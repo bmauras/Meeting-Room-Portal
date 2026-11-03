@@ -1,0 +1,29 @@
+{
+  "$schema": "./deployment.schema.json",
+  "name": "test",
+  "tenantId": "<GUID du tenant Microsoft 365 qui héberge les salles>",
+  "subscriptionId": "<GUID d'un abonnement Azure de ce tenant>",
+  "resourceGroup": "rg-meetingroomportal-test",
+  "location": "francecentral",
+  "partner": {
+    "tenantId": "<GUID du tenant partenaire>",
+    "displayName": "<Nom du partenaire>",
+    "domains": ["<domaine-partenaire.com>"]
+  },
+  "organizerUpn": "resa-externe@<domaine-du-tenant.com>",
+  "allowedAttendeeDomains": ["<domaine-du-tenant.com>", "<domaine-partenaire.com>"],
+  "allowInternalUsers": true,
+  "timeZone": "Europe/Paris",
+  "appServiceSku": "B1",
+  "booking": {
+    "dayStart": "08:00",
+    "dayEnd": "19:00",
+    "maxDurationMinutes": 240,
+    "horizonDays": 30,
+    "allowWeekends": false
+  },
+  "exchange": {
+    "organizerAttributeNumber": 15,
+    "fixRoomProcessing": false
+  }
+}

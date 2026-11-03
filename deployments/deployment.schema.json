@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Installation du Meeting Room Portal",
+  "type": "object",
+  "required": ["name", "tenantId", "subscriptionId", "resourceGroup", "location", "partner", "organizerUpn", "allowedAttendeeDomains"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "description": "Nom court de l'installation (test, prod…). Sert à nommer les ressources et objets.", "type": "string", "pattern": "^[a-z0-9]{1,8}$" },
+    "tenantId": { "description": "Tenant Microsoft 365 qui héberge les salles.", "type": "string", "format": "uuid" },
+    "subscriptionId": { "description": "Abonnement Azure rattaché à ce même tenant.", "type": "string", "format": "uuid" },
+    "resourceGroup": { "type": "string" },
+    "location": { "description": "Région Azure, ex. francecentral, switzerlandnorth, westeurope.", "type": "string" },
+    "namePrefix": { "type": "string", "pattern": "^[a-z0-9]{1,10}$", "default": "roomportal" },
+    "partner": {
+      "type": "object",
+      "required": ["tenantId", "displayName", "domains"],
+      "additionalProperties": false,
+      "properties": {
+        "tenantId": { "description": "Tenant d'origine des invités autorisés.", "type": "string", "format": "uuid" },
+        "displayName": { "description": "Affiché dans le portail et en préfixe des réunions.", "type": "string", "maxLength": 40 },
+        "domains": { "description": "Domaines e-mail des invités à inclure dans le groupe d'accès.", "type": "array", "minItems": 1, "items": { "type": "string" } }
+      }
+    },
+    "organizerUpn": { "description": "Boîte utilisateur licenciée Exchange + Teams qui organise les réservations.", "type": "string", "format": "email" },
+    "allowedAttendeeDomains": { "description": "Domaines autorisés pour les participants additionnels.", "type": "array", "items": { "type": "string" } },
+    "allowInternalUsers": { "description": "Recette uniquement : autorise les comptes membres du tenant.", "type": "boolean", "default": false },
+    "timeZone": { "description": "Fuseau IANA des salles.", "type": "string", "default": "Europe/Paris" },
+    "appServiceSku": { "enum": ["B1", "B2", "P0v3", "P1v3"], "default": "B1" },
+    "customBaseUrl": { "description": "URL https si un domaine personnalisé est configuré.", "type": "string" },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vnetAddressPrefix": { "type": "string", "default": "10.60.0.0/24" },
+        "appSubnetPrefix": { "type": "string", "default": "10.60.0.0/26" }
+      }
+    },
+    "booking": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dayStart": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$", "default": "08:00" },
+        "dayEnd": { "type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$", "default": "19:00" },
+        "slotMinutes": { "type": "integer", "minimum": 5, "maximum": 60, "default": 15 },
+        "maxDurationMinutes": { "type": "integer", "minimum": 15, "default": 240 },
+        "horizonDays": { "type": "integer", "minimum": 1, "maximum": 365, "default": 30 },
+        "maxActivePerUser": { "type": "integer", "minimum": 1, "default": 10 },
+        "allowWeekends": { "type": "boolean", "default": false }
+      }
+    },
+    "exchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "organizerAttributeNumber": { "description": "CustomAttributeN utilisé pour marquer la boîte organisatrice.", "type": "integer", "minimum": 1, "maximum": 15, "default": 15 },
+        "fixRoomProcessing": { "description": "Corrige le traitement automatique des salles non conformes.", "type": "boolean", "default": false }
+      }
+    }
+  }
+}

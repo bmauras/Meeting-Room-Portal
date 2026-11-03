@@ -1,0 +1,367 @@
+:root {
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --text: #1d2330;
+  --muted: #5f6b7a;
+  --border: #dde1e7;
+  --primary: #1f5fbf;
+  --primary-text: #ffffff;
+  --busy: #c9d3e3;
+  --busy-border: #9fb0c9;
+  --past: rgba(120, 130, 145, 0.12);
+  --selection: #1f5fbf;
+  --success-bg: #e6f4ea;
+  --success-text: #1e6b34;
+  --error-bg: #fdecea;
+  --error-text: #a3261b;
+  --warning-bg: #fff4e0;
+  --warning-text: #8a5a00;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --surface: #1d2128;
+    --text: #e6e9ee;
+    --muted: #9aa5b4;
+    --border: #2f3540;
+    --primary: #5b95ec;
+    --primary-text: #0d1117;
+    --busy: #36435a;
+    --busy-border: #4d5d78;
+    --past: rgba(0, 0, 0, 0.25);
+    --selection: #8ab4f8;
+    --success-bg: #183324;
+    --success-text: #8fd5a6;
+    --error-bg: #3a1c1a;
+    --error-text: #f2a39b;
+    --warning-bg: #3a2c12;
+    --warning-text: #f0c674;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+h1,
+h2 {
+  margin: 0 0 0.5rem;
+  line-height: 1.2;
+}
+h1 {
+  font-size: 1.4rem;
+}
+h2 {
+  font-size: 1.1rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 0.85em;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 500;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.55rem;
+  font-weight: 400;
+}
+
+.button {
+  display: inline-block;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: center;
+}
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.button-primary {
+  background: var(--primary);
+  color: var(--primary-text);
+}
+.button-ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.link.danger {
+  color: var(--error-text);
+}
+
+.alert {
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin: 0 0 1rem;
+}
+.alert-error {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+.alert-success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+.alert-warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+/* Connexion */
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.login-card {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Structure */
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.topbar-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+.side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 1rem 16px;
+  }
+}
+
+.toolbar {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.toolbar .grow {
+  flex: 1 1 180px;
+}
+.toolbar input[type='number'] {
+  width: 7rem;
+}
+.date-title {
+  text-transform: capitalize;
+}
+
+/* Planning */
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.timeline-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+}
+@media (max-width: 600px) {
+  .timeline-row {
+    grid-template-columns: 110px minmax(0, 1fr);
+  }
+}
+.timeline-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.room-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timeline-track {
+  position: relative;
+  height: 34px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.timeline-header .timeline-track {
+  height: 20px;
+  background: none;
+  border: 0;
+  overflow: visible;
+}
+.timeline-track.clickable {
+  cursor: pointer;
+}
+.timeline-track.unavailable {
+  cursor: not-allowed;
+  background: repeating-linear-gradient(45deg, var(--bg), var(--bg) 6px, var(--border) 6px, var(--border) 8px);
+}
+.timeline-hour {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.timeline-grid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--border);
+}
+.timeline-past {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--past);
+  cursor: not-allowed;
+}
+.timeline-busy {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: var(--busy);
+  border: 1px solid var(--busy-border);
+  border-radius: 4px;
+  cursor: not-allowed;
+}
+.timeline-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--selection);
+}
+
+/* Formulaire */
+.booking-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.row {
+  display: flex;
+  gap: 0.75rem;
+}
+.row > label {
+  flex: 1;
+}
+.actions {
+  justify-content: flex-end;
+}
+
+/* Mes réservations */
+.booking-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.booking-list li {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+.booking-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+.booking-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.25rem;
+}
+.badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  white-space: nowrap;
+}
+.badge-pending {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+.badge-confirmed {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+.badge-declined,
+.badge-cancelled {
+  background: var(--error-bg);
+  color: var(--error-text);
+}

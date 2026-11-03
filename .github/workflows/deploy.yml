@@ -1,0 +1,77 @@
+name: Build & deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deployment:
+        description: Installation à mettre à jour (fichier deployments/<nom>.json et environnement GitHub du même nom)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Tests + paquet
+        shell: pwsh
+        run: ./scripts/build-package.ps1 -OutputPath app.zip
+
+      - name: Audit des dépendances de production
+        run: |
+          (cd server && npm audit --omit=dev --audit-level=high)
+          (cd web && npm audit --omit=dev --audit-level=high)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: app.zip
+          retention-days: 30
+
+  # Met à jour l'infrastructure et l'application d'une installation existante. La première
+  # installation (Entra, Exchange, Teams) se fait depuis un poste administrateur : scripts/deploy.ps1.
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.deployment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DEPLOYMENT: ${{ inputs.deployment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Variables propres à l'environnement GitHub : chaque installation a son tenant et son identité de déploiement.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: app
+
+      - name: Déploiement
+        shell: pwsh
+        run: |
+          if ($env:DEPLOYMENT -cnotmatch '^[a-z0-9]{1,8}$') { throw 'Nom d''installation invalide.' }
+          ./scripts/deploy.ps1 -Config "deployments/$env:DEPLOYMENT.json" -Steps Infra,App -PackagePath app.zip -Force
