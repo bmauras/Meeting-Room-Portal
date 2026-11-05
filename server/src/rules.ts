@@ -79,15 +79,17 @@ export function sanitizeSubject(raw: string): Result<string> {
 /**
  * Participants additionnels : limités aux domaines autorisés pour que le portail ne puisse pas
  * servir à envoyer des invitations depuis notre domaine vers des adresses arbitraires.
+ * « * » lève cette restriction (le nombre de participants et le rate limiting restent bornés).
  */
 export function normalizeAttendees(raw: string[], rules: BookingRules, bookerEmail: string): Result<string[]> {
+  const anyDomain = rules.allowedAttendeeDomains.includes('*');
   const unique = new Set<string>();
   for (const entry of raw) {
     const email = entry.trim().toLowerCase();
     if (!email) continue;
     if (!EMAIL.test(email)) return { ok: false, error: `Adresse e-mail invalide : ${email.slice(0, 80)}` };
     const domain = email.split('@')[1] ?? '';
-    if (!rules.allowedAttendeeDomains.includes(domain)) {
+    if (!anyDomain && !rules.allowedAttendeeDomains.includes(domain)) {
       return { ok: false, error: `Le domaine ${domain} n'est pas autorisé pour les participants.` };
     }
     if (email !== bookerEmail.toLowerCase()) unique.add(email);

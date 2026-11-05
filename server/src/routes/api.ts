@@ -3,7 +3,7 @@ import { rateLimit } from 'express-rate-limit';
 import type { SessionUser } from '../authz.js';
 import type { BookingService } from '../bookings.js';
 import type { Config } from '../config.js';
-import { requireSameOrigin, wrap } from '../http.js';
+import { clientIp, requireSameOrigin, wrap } from '../http.js';
 import type { RoomService } from '../rooms.js';
 import type { BookingRules } from '../rules.js';
 import type { Sessions } from '../session.js';
@@ -91,14 +91,14 @@ export function apiRouter(deps: { config: Config; sessions: Sessions; rooms: Roo
     '/bookings',
     createLimiter,
     wrap(async (req, res) => {
-      res.status(201).json(await bookings.create(userOf(res), req.body, req.ip ?? ''));
+      res.status(201).json(await bookings.create(userOf(res), req.body, clientIp(req)));
     }),
   );
 
   router.delete(
     '/bookings/:id',
     wrap(async (req, res) => {
-      await bookings.cancel(userOf(res), String(req.params.id), req.ip ?? '');
+      await bookings.cancel(userOf(res), String(req.params.id), clientIp(req));
       res.status(204).end();
     }),
   );

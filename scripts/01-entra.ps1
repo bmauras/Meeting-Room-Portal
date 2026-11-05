@@ -23,12 +23,34 @@ param(
   [Parameter(Mandatory)] [string] $ManagedIdentityPrincipalId,
   [Parameter(Mandatory)] [string] $PartnerTenantId,
   [Parameter(Mandatory)] [string[]] $PartnerDomains,
+  # Identité managée du runbook de synchronisation des salles (sortie Bicep syncIdentityPrincipalId).
+  [string] $SyncPrincipalId,
   [string] $InstanceName = 'MeetingRoomPortal',
-  [switch] $IncludeLocalhostRedirect
+  [switch] $IncludeLocalhostRedirect,
+  # Fichier JSON où écrire le résultat (utilisé quand le script tourne dans un processus séparé).
+  [string] $ResultPath
 )
 
 $ErrorActionPreference = 'Stop'
+# Les cmdlets Microsoft.Graph sont des fonctions de module : elles ignorent $ErrorActionPreference
+# du script appelant. Sans ceci, une erreur Graph n'interrompt pas le script.
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 #Requires -Modules Microsoft.Graph.Authentication, Microsoft.Graph.Applications, Microsoft.Graph.Groups, Microsoft.Graph.Users, Microsoft.Graph.Identity.SignIns
+
+# Un objet Entra tout juste créé peut ne pas être encore visible par les appels suivants.
+function Invoke-WithRetry([string] $What, [scriptblock] $Action, [int] $Attempts = 6) {
+  for ($i = 1; ; $i++) {
+    try { return & $Action }
+    catch {
+      if ($i -ge $Attempts) { throw }
+      Write-Host "  $What : réplication Entra en cours, nouvel essai dans $($i * 5) s ($($_.Exception.Message.Split("`n")[0]))"
+      Start-Sleep -Seconds ($i * 5)
+    }
+  }
+}
+
+# Avec pwsh -File, une liste arrive sous forme d'une seule chaîne « a,b ».
+$PartnerDomains = @($PartnerDomains | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 $displayName = $InstanceName
 $groupName = "SG-$InstanceName-PartnerGuests"
@@ -40,6 +62,7 @@ Connect-MgGraph -TenantId $TenantId -NoWelcome -Scopes @(
   'DelegatedPermissionGrant.ReadWrite.All',
   'Group.ReadWrite.All',
   'User.Read.All',
+  'Organization.Read.All',
   'Policy.Read.All',
   'Policy.ReadWrite.CrossTenantAccess',
   'Policy.ReadWrite.ConditionalAccess'
@@ -76,33 +99,43 @@ $appParams = @{
 
 $app = Get-MgApplication -Filter "displayName eq '$displayName'" | Select-Object -First 1
 if (-not $app) {
-  $appParams.AppRoles = @(@{
-      Id                 = [guid]::NewGuid()
-      AllowedMemberTypes = @('User')
-      DisplayName        = 'Room Booker'
-      Description        = 'Peut réserver des salles de réunion via le portail.'
-      Value              = 'Room.Booker'
-      IsEnabled          = $true
-    })
   $app = New-MgApplication @appParams
   Write-Host "App registration créée : $($app.AppId)"
 } else {
   Update-MgApplication -ApplicationId $app.Id @appParams
-  $app = Get-MgApplication -ApplicationId $app.Id
   Write-Host "App registration mise à jour : $($app.AppId)"
 }
+
+# Rôles d'application (identifiants existants conservés) et adresse d'API api://<appId>, cible du
+# jeton que le runbook de synchronisation présente au portail.
+$roleDefinitions = @(
+  @{ Value = 'Room.Booker'; DisplayName = 'Room Booker'; Description = 'Peut réserver des salles de réunion via le portail.'; AllowedMemberTypes = @('User') },
+  @{ Value = 'RoomDirectory.Write'; DisplayName = 'Room Directory Writer'; Description = 'Peut mettre à jour l''annuaire des salles du portail (runbook de synchronisation).'; AllowedMemberTypes = @('Application') }
+)
+$roles = @(foreach ($definition in $roleDefinitions) {
+    $existing = $app.AppRoles | Where-Object Value -eq $definition.Value | Select-Object -First 1
+    $definition + @{ Id = if ($existing) { $existing.Id } else { [guid]::NewGuid().ToString() }; IsEnabled = $true }
+  })
+Update-MgApplication -ApplicationId $app.Id -AppRoles $roles -IdentifierUris @("api://$($app.AppId)")
+$app = Get-MgApplication -ApplicationId $app.Id
 $roleId = ($app.AppRoles | Where-Object Value -eq 'Room.Booker').Id
+$syncRoleId = ($app.AppRoles | Where-Object Value -eq 'RoomDirectory.Write').Id
 
 # --- 2. Enterprise app ---------------------------------------------------------------------
+if (-not $app.AppId -or -not $roleId) { throw "App registration $displayName introuvable après création." }
 $sp = Get-MgServicePrincipal -Filter "appId eq '$($app.AppId)'"
-if (-not $sp) { $sp = New-MgServicePrincipal -AppId $app.AppId }
-Update-MgServicePrincipal -ServicePrincipalId $sp.Id -AppRoleAssignmentRequired:$true -Tags @('WindowsAzureActiveDirectoryIntegratedApp', 'HideApp')
+if (-not $sp) { $sp = Invoke-WithRetry 'Enterprise app' { New-MgServicePrincipal -AppId $app.AppId } }
+Invoke-WithRetry 'Enterprise app' {
+  Update-MgServicePrincipal -ServicePrincipalId $sp.Id -AppRoleAssignmentRequired:$true -Tags @('WindowsAzureActiveDirectoryIntegratedApp', 'HideApp')
+}
 
 # --- 3. Consentement administrateur openid/profile/email ----------------------------------
 $grant = Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)'" -All |
   Where-Object { $_.ResourceId -eq $graphSp.Id -and $_.ConsentType -eq 'AllPrincipals' }
 if (-not $grant) {
-  New-MgOauth2PermissionGrant -ClientId $sp.Id -ResourceId $graphSp.Id -ConsentType 'AllPrincipals' -Scope 'openid profile email' | Out-Null
+  Invoke-WithRetry 'Consentement' {
+    New-MgOauth2PermissionGrant -ClientId $sp.Id -ResourceId $graphSp.Id -ConsentType 'AllPrincipals' -Scope 'openid profile email' | Out-Null
+  }
 }
 
 # --- 4. Credential fédéré (Managed Identity → app registration) ---------------------------
@@ -145,7 +178,28 @@ if ($guests.Count -eq 0) { Write-Warning "Aucun invité trouvé pour les domaine
 
 $assigned = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $sp.Id -All | Where-Object PrincipalId -eq $group.Id
 if (-not $assigned) {
-  New-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $sp.Id -PrincipalId $group.Id -ResourceId $sp.Id -AppRoleId $roleId | Out-Null
+  Invoke-WithRetry 'Attribution du rôle' {
+    New-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $sp.Id -PrincipalId $group.Id -ResourceId $sp.Id -AppRoleId $roleId | Out-Null
+  }
+}
+
+# --- 5 bis. Identité du runbook de synchronisation des salles -----------------------------
+if ($SyncPrincipalId) {
+  # Droit de mettre à jour l'annuaire du portail, et seulement cela.
+  $assignedSync = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $sp.Id -All | Where-Object { $_.PrincipalId -eq $SyncPrincipalId -and $_.AppRoleId -eq $syncRoleId }
+  if (-not $assignedSync) {
+    Invoke-WithRetry 'Rôle RoomDirectory.Write' {
+      New-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $sp.Id -PrincipalId $SyncPrincipalId -ResourceId $sp.Id -AppRoleId $syncRoleId | Out-Null
+    }
+  }
+  # Connexion Exchange Online en mode application. Les droits effectifs viennent du groupe de rôles
+  # Exchange en lecture seule créé par 02-exchange.ps1, pas de cette permission.
+  $exchangeSp = Get-MgServicePrincipal -Filter "appId eq '00000002-0000-0ff1-ce00-000000000000'"
+  $manageAsApp = $exchangeSp.AppRoles | Where-Object Value -eq 'Exchange.ManageAsApp'
+  $syncAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $SyncPrincipalId -All
+  if (-not ($syncAssignments | Where-Object AppRoleId -eq $manageAsApp.Id)) {
+    New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $SyncPrincipalId -PrincipalId $SyncPrincipalId -ResourceId $exchangeSp.Id -AppRoleId $manageAsApp.Id | Out-Null
+  }
 }
 
 # --- 6. Place.Read.All pour la Managed Identity -------------------------------------------
@@ -171,7 +225,7 @@ if (-not $partner) {
 
 # --- 8. Accès conditionnel (rapport seulement) ---------------------------------------------
 if (-not (Get-MgIdentityConditionalAccessPolicy -Filter "displayName eq '$caName'")) {
-  New-MgIdentityConditionalAccessPolicy -BodyParameter @{
+  Invoke-WithRetry 'Accès conditionnel' { New-MgIdentityConditionalAccessPolicy -BodyParameter @{
     displayName     = $caName
     state           = 'enabledForReportingButNotEnforced'
     conditions      = @{
@@ -183,8 +237,14 @@ if (-not (Get-MgIdentityConditionalAccessPolicy -Filter "displayName eq '$caName
     sessionControls = @{
       signInFrequency = @{ isEnabled = $true; type = 'hours'; value = 12; frequencyInterval = 'timeBased'; authenticationType = 'primaryAndSecondaryAuthentication' }
     }
-  } | Out-Null
+  } | Out-Null }
   Write-Host "Stratégie $caName créée en mode rapport seulement : passez-la à « Activé » après vérification des sign-in logs."
 }
 
-[pscustomobject]@{ ClientId = $app.AppId; GroupId = $group.Id }
+# Domaine initial (*.onmicrosoft.com) : requis par Connect-ExchangeOnline -ManagedIdentity.
+$organization = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains'
+$initialDomain = ($organization.value[0].verifiedDomains | Where-Object { $_.isInitial } | Select-Object -First 1).name
+
+$result = [pscustomobject]@{ ClientId = $app.AppId; GroupId = $group.Id; InitialDomain = $initialDomain }
+if ($ResultPath) { $result | ConvertTo-Json | Set-Content $ResultPath -Encoding utf8 }
+$result

@@ -11,6 +11,7 @@
     "subscriptionId": { "description": "Abonnement Azure rattaché à ce même tenant.", "type": "string", "format": "uuid" },
     "resourceGroup": { "type": "string" },
     "location": { "description": "Région Azure, ex. francecentral, switzerlandnorth, westeurope.", "type": "string" },
+    "automationLocation": { "description": "Région du compte Azure Automation (synchronisation des salles), si le quota de la région principale est atteint. Par défaut : location.", "type": "string" },
     "namePrefix": { "type": "string", "pattern": "^[a-z0-9]{1,10}$", "default": "roomportal" },
     "partner": {
       "type": "object",
@@ -23,7 +24,7 @@
       }
     },
     "organizerUpn": { "description": "Boîte utilisateur licenciée Exchange + Teams qui organise les réservations.", "type": "string", "format": "email" },
-    "allowedAttendeeDomains": { "description": "Domaines autorisés pour les participants additionnels.", "type": "array", "items": { "type": "string" } },
+    "allowedAttendeeDomains": { "description": "Domaines autorisés pour les participants additionnels ; [\"*\"] accepte toute adresse (10 participants max., adresses tracées dans l'audit).", "type": "array", "items": { "type": "string" } },
     "allowInternalUsers": { "description": "Recette uniquement : autorise les comptes membres du tenant.", "type": "boolean", "default": false },
     "timeZone": { "description": "Fuseau IANA des salles.", "type": "string", "default": "Europe/Paris" },
     "appServiceSku": { "enum": ["B1", "B2", "P0v3", "P1v3"], "default": "B1" },

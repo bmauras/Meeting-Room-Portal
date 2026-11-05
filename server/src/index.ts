@@ -9,7 +9,9 @@ import { DefaultAzureCredential, ManagedIdentityCredential, type TokenCredential
 import { AuditLog } from './audit.js';
 import { BookingError, BookingService } from './bookings.js';
 import { loadConfig } from './config.js';
+import { createSyncAuthenticator, DirectoryStore, directoryRouter } from './directory.js';
 import { GraphClient, GraphError } from './graph.js';
+import { clientIp } from './http.js';
 import { RoomService } from './rooms.js';
 import type { BookingRules } from './rules.js';
 import { apiRouter } from './routes/api.js';
@@ -31,9 +33,10 @@ function table(name: string): TableClient {
 
 const bookingsTable = table('bookings');
 const auditTable = table('audit');
+const directoryTable = table('directory');
 if (config.STORAGE_CONNECTION_STRING) {
   // Azurite : en Azure, les tables sont créées par le déploiement Bicep.
-  await Promise.all([bookingsTable.createTable(), auditTable.createTable()]);
+  await Promise.all([bookingsTable.createTable(), auditTable.createTable(), directoryTable.createTable()]);
 }
 
 const rules: BookingRules = {
@@ -48,7 +51,15 @@ const rules: BookingRules = {
 };
 
 const graph = new GraphClient(credential, config.TIME_ZONE);
-const rooms = new RoomService(graph, config.ORGANIZER_UPN, config.TIME_ZONE);
+const rooms = new RoomService(graph, config.ORGANIZER_UPN, config.TIME_ZONE, config.ROOM_DIRECTORY);
+const directoryStore = new DirectoryStore(directoryTable);
+// Dernier annuaire transmis par le runbook (prioritaire sur celui relevé au déploiement).
+try {
+  const saved = await directoryStore.load();
+  if (saved.rooms.length) rooms.setDirectory(saved.rooms, saved.syncedAt);
+} catch (err) {
+  console.warn(JSON.stringify({ type: 'directory_load_failed', message: (err as Error).message }));
+}
 const audit = new AuditLog(auditTable);
 const bookings = new BookingService({
   graph,
@@ -89,8 +100,13 @@ app.use(
   }),
 );
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+// Identifiant du paquet (écrit par build-package.ps1) : permet au déploiement d'attendre la nouvelle version.
+const versionFile = path.join(here, '../version.txt');
+const version = fs.existsSync(versionFile) ? fs.readFileSync(versionFile, 'utf8').trim() : 'dev';
+
 app.get('/healthz', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', version });
 });
 
 app.use(
@@ -99,9 +115,22 @@ app.use(
     limit: 120,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    keyGenerator: (req) => clientIp(req),
     message: { error: 'Trop de requêtes, réessayez dans un instant.' },
   }),
 );
+// Avant le parseur JSON global : cette route a sa propre limite de taille et sa propre authentification.
+if (config.SYNC_PRINCIPAL_ID) {
+  app.use(
+    '/api/internal',
+    directoryRouter({
+      authenticate: createSyncAuthenticator({ tenantId: config.TENANT_ID, clientId: config.ENTRA_CLIENT_ID, syncPrincipalId: config.SYNC_PRINCIPAL_ID }),
+      store: directoryStore,
+      rooms,
+      audit,
+    }),
+  );
+}
 app.use(express.json({ limit: '10kb' }));
 
 app.use('/auth', authRouter({ config, msal, sessions, audit }));
@@ -110,8 +139,7 @@ app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Ressource introuvable.' });
 });
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const staticDir = [config.STATIC_DIR, path.join(here, '../public'), path.join(here, '../../web/dist')].find(
+const staticDir =[config.STATIC_DIR, path.join(here, '../public'), path.join(here, '../../web/dist')].find(
   (dir): dir is string => Boolean(dir) && fs.existsSync(path.join(dir!, 'index.html')),
 );
 if (staticDir) {
@@ -144,4 +172,5 @@ app.use(errorHandler);
 
 app.listen(config.PORT, () => {
   console.log(`Meeting Room Portal à l'écoute sur le port ${config.PORT}`);
+  void bookings.checkOrganizerOnlineMeetings();
 });

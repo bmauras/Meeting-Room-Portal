@@ -16,6 +16,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 #Requires -Modules MicrosoftTeams
 
 $policyName = "$InstanceName-Organizer"

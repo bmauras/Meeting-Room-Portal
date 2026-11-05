@@ -90,6 +90,7 @@ Le stockage local utilise [Azurite](https://learn.microsoft.com/azure/storage/co
 
 ## Exploitation
 
+- **Nouvelles salles** : rien à faire. Le runbook `Sync-RoomDirectory` (Azure Automation) les transmet au portail en 15 minutes au plus. En cas de doute, ouvrez le compte Automation `aa-…`, puis *Tâches* : chaque exécution affiche le nombre de salles transmises, ajoutées et retirées.
 - **Nouveaux invités du partenaire** : relancer `deploy.ps1 -Steps Entra`, ou les ajouter au groupe `SG-MeetingRoomPortal-<nom>-PartnerGuests`. Une revue d'accès trimestrielle sur ce groupe est recommandée.
 - **Audit** : table `audit` du compte de stockage, et `AppServiceConsoleLogs` dans Log Analytics (lignes `"type":"audit"`).
 - **Règles de réservation** : bloc `booking` de la configuration, puis `deploy.ps1 -Steps Infra`.

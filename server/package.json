@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/rules.test.ts src/authz.test.ts"
+    "test": "tsx --test src/rules.test.ts src/authz.test.ts src/rooms.test.ts src/directory.test.ts"
   },
   "dependencies": {
     "@azure/data-tables": "^13.3.0",
@@ -21,6 +21,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "iron-session": "^8.0.4",
+    "jose": "^6.2.15",
     "zod": "^4.6.7"
   },
   "devDependencies": {

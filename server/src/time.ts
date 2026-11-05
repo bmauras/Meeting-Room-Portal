@@ -36,6 +36,14 @@ export function isWeekend(date: string): boolean {
   return day === 0 || day === 6;
 }
 
+/** 'YYYY-MM-DD' → « mercredi 4 novembre 2026 ». */
+export function formatLongDate(date: string): string {
+  const [y, m, d] = date.split('-').map(Number) as [number, number, number];
+  return new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(
+    new Date(Date.UTC(y, m - 1, d)),
+  );
+}
+
 export function toMinutes(time: string): number {
   const m = TIME.exec(time);
   if (!m) return Number.NaN;

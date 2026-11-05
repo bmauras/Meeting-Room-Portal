@@ -32,6 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $isCi = [bool]$env:GITHUB_ACTIONS
 
@@ -59,7 +60,7 @@ function Read-DeploymentConfig([string] $path) {
   $attendeeDomains = @($c.allowedAttendeeDomains | Where-Object { $_ })
   & $check ($partnerDomains.Count -gt 0 -and -not ($partnerDomains | Where-Object { $_ -notmatch $domain })) 'partner.domains : domaines e-mail des invités du partenaire.'
   & $check ($c.organizerUpn -match $email) 'organizerUpn : adresse de la boîte organisatrice.'
-  & $check ($attendeeDomains.Count -gt 0 -and -not ($attendeeDomains | Where-Object { $_ -notmatch $domain })) 'allowedAttendeeDomains : liste de domaines.'
+  & $check ($attendeeDomains.Count -gt 0 -and -not ($attendeeDomains | Where-Object { $_ -ne '*' -and $_ -notmatch $domain })) 'allowedAttendeeDomains : liste de domaines, ou ["*"] pour tout domaine.'
   if ($c.namePrefix) { & $check ($c.namePrefix -cmatch '^[a-z0-9]{1,10}$') 'namePrefix : 1 à 10 caractères, minuscules et chiffres.' }
   if ($c.customBaseUrl) { & $check ($c.customBaseUrl -match '^https://') 'customBaseUrl : URL https.' }
 
@@ -75,6 +76,7 @@ function Read-DeploymentConfig([string] $path) {
     SubscriptionId           = $c.subscriptionId
     ResourceGroup            = $c.resourceGroup
     Location                 = $c.location
+    AutomationLocation       = $c.automationLocation ?? $c.location
     NamePrefix               = $c.namePrefix ?? 'roomportal'
     PartnerTenantId          = $c.partner.tenantId.ToLowerInvariant()
     PartnerDisplayName       = $c.partner.displayName
@@ -113,6 +115,14 @@ function Invoke-Az {
 function Invoke-AzJson { (Invoke-Az @args -o json) -join "`n" | ConvertFrom-Json }
 
 function Write-Step([string] $title) { Write-Host "`n=== $title ===" -ForegroundColor Cyan }
+
+# Microsoft.Graph, ExchangeOnlineManagement et MicrosoftTeams embarquent chacun leur version de
+# MSAL (Microsoft.Identity.Client) ; .NET n'en charge qu'une par processus. Chaque script tourne
+# donc dans un processus PowerShell neuf, quel que soit l'historique de la session courante.
+function Invoke-IsolatedScript([string] $script, [string[]] $arguments) {
+  & ([Environment]::ProcessPath) -NoProfile -File (Join-Path $PSScriptRoot $script) @arguments
+  if ($LASTEXITCODE -ne 0) { throw "$script a échoué (code $LASTEXITCODE)." }
+}
 
 # ------------------------------------------------------------------------------- Étapes
 
@@ -167,6 +177,9 @@ function Step-Infra([bool] $allowNewSecret = $true) {
     vnetAddressPrefix      = $cfg.VnetAddressPrefix
     appSubnetPrefix        = $cfg.AppSubnetPrefix
     timeZone               = $cfg.TimeZone
+    automationLocation     = $cfg.AutomationLocation
+    roomDirectory          = $state.roomDirectory ?? '[]'
+    tenantInitialDomain    = $state.tenantInitialDomain ?? ''
   }
 
   # La clé de session n'est générée qu'à la création (ou sur demande) : sinon Bicep conserve celle de Key Vault.
@@ -202,63 +215,216 @@ function Step-Infra([bool] $allowNewSecret = $true) {
   $state.appUrl = $outputs.appUrl.value
   $state.managedIdentityClientId = $outputs.managedIdentityClientId.value
   $state.managedIdentityPrincipalId = $outputs.managedIdentityPrincipalId.value
+  $state.automationAccountName = $outputs.automationAccountName.value
+  $state.syncIdentityClientId = $outputs.syncIdentityClientId.value
+  $state.syncIdentityPrincipalId = $outputs.syncIdentityPrincipalId.value
   $state.deployedEntraClientId = $parameters.entraClientId
+  $state.deployedRoomDirectory = $parameters.roomDirectory
+  $state.deployedTenantInitialDomain = $parameters.tenantInitialDomain
   Save-State
   Write-Host "Application : $($state.appUrl)"
+  Publish-SyncRunbook
+}
+
+function Get-AutomationBase {
+  "https://management.azure.com/subscriptions/$($cfg.SubscriptionId)/resourceGroups/$($cfg.ResourceGroup)/providers/Microsoft.Automation/automationAccounts/$($state.automationAccountName)"
+}
+
+function Invoke-AzRestPut([string] $url, [object] $body) {
+  $file = New-TemporaryFile
+  try {
+    $body | ConvertTo-Json -Depth 6 | Set-Content $file -Encoding utf8
+    Invoke-Az rest --method put --url $url --body "@$file" | Out-Null
+  } finally {
+    Remove-Item $file -Force
+  }
+}
+
+# Runbook de synchronisation des salles : contenu, publication, et exécution toutes les 15 min.
+# Une planification Azure Automation est au plus horaire : quatre planifications décalées de 15 min.
+function Publish-SyncRunbook {
+  if (-not $state.automationAccountName) { return }
+  $base = Get-AutomationBase
+  $api = 'api-version=2023-11-01'
+  $runbook = 'Sync-RoomDirectory'
+
+  Invoke-AzRestPut "$base/runbooks/$($runbook)?$api" @{
+    location   = $cfg.AutomationLocation
+    properties = @{ runbookType = 'PowerShell'; logProgress = $false; logVerbose = $false; description = 'Synchronise les salles Exchange avec le Meeting Room Portal.' }
+  }
+  Invoke-Az rest --method put --url "$base/runbooks/$runbook/draft/content?$api" --headers 'Content-Type=text/powershell' `
+    --body "@$(Join-Path $PSScriptRoot 'runbooks/Sync-RoomDirectory.ps1')" | Out-Null
+  for ($attempt = 1; ; $attempt++) {
+    try {
+      Invoke-Az rest --method post --url "$base/runbooks/$runbook/publish?$api" | Out-Null
+      break
+    } catch {
+      if ($attempt -ge 4) { throw }
+      Start-Sleep -Seconds 5
+    }
+  }
+
+  $schedules = @((Invoke-AzJson rest --method get --url "$base/schedules?$api").value)
+  $jobSchedules = @((Invoke-AzJson rest --method get --url "$base/jobSchedules?$api").value)
+  for ($i = 0; $i -lt 4; $i++) {
+    $name = "RoomSync-$($i * 15)"
+    if (-not ($schedules | Where-Object name -eq $name)) {
+      Invoke-AzRestPut "$base/schedules/$($name)?$api" @{
+        properties = @{
+          startTime   = (Get-Date).ToUniversalTime().AddMinutes(10 + $i * 15).ToString('yyyy-MM-ddTHH:mm:00Z')
+          frequency   = 'Hour'
+          interval    = 1
+          timeZone    = 'UTC'
+          description = "Synchronisation des salles (décalage $($i * 15) min)"
+        }
+      }
+    }
+    if (-not ($jobSchedules | Where-Object { $_.properties.schedule.name -eq $name -and $_.properties.runbook.name -eq $runbook })) {
+      Invoke-AzRestPut "$base/jobSchedules/$([guid]::NewGuid())?$api" @{ properties = @{ schedule = @{ name = $name }; runbook = @{ name = $runbook } } }
+    }
+  }
+  Write-Host 'Runbook de synchronisation des salles publié (exécution toutes les 15 min).'
+}
+
+# Première synchronisation sans attendre la planification (si le module Exchange est importé).
+function Start-RoomSync {
+  if (-not $state.automationAccountName) { return }
+  $base = Get-AutomationBase
+  $api = 'api-version=2023-11-01'
+  $module = Invoke-AzJson rest --method get --url "$base/modules/ExchangeOnlineManagement?$api"
+  if ($module.properties.provisioningState -ne 'Succeeded') {
+    Write-Host "Module Exchange en cours d'import dans Azure Automation ($($module.properties.provisioningState)) : la synchronisation démarrera à la prochaine planification."
+    return
+  }
+  Invoke-AzRestPut "$base/jobs/$([guid]::NewGuid())?$api" @{ properties = @{ runbook = @{ name = 'Sync-RoomDirectory' } } }
+  Write-Host 'Synchronisation des salles lancée (résultat dans Azure Automation > Tâches).'
 }
 
 function Step-Entra {
   Write-Step "Entra ID ($($cfg.InstanceName))"
   if (-not $state.managedIdentityPrincipalId) { throw 'Lancez d''abord l''étape Infra.' }
-  $result = & (Join-Path $PSScriptRoot '01-entra.ps1') `
-    -TenantId $cfg.TenantId `
-    -AppUrl $state.appUrl `
-    -ManagedIdentityPrincipalId $state.managedIdentityPrincipalId `
-    -PartnerTenantId $cfg.PartnerTenantId `
-    -PartnerDomains $cfg.PartnerDomains `
-    -InstanceName $cfg.InstanceName `
-    -IncludeLocalhostRedirect:($cfg.AllowInternalUsers) | Select-Object -Last 1
+  $resultPath = Join-Path ([IO.Path]::GetTempPath()) "roomportal-entra-$([guid]::NewGuid()).json"
+  $arguments = @(
+    '-TenantId', $cfg.TenantId,
+    '-AppUrl', $state.appUrl,
+    '-ManagedIdentityPrincipalId', $state.managedIdentityPrincipalId,
+    '-PartnerTenantId', $cfg.PartnerTenantId,
+    '-PartnerDomains', ($cfg.PartnerDomains -join ','),
+    '-InstanceName', $cfg.InstanceName,
+    '-ResultPath', $resultPath
+  )
+  if ($state.syncIdentityPrincipalId) { $arguments += @('-SyncPrincipalId', $state.syncIdentityPrincipalId) }
+  if ($cfg.AllowInternalUsers) { $arguments += '-IncludeLocalhostRedirect' }
+  try {
+    Invoke-IsolatedScript '01-entra.ps1' $arguments
+    $result = Get-Content $resultPath -Raw | ConvertFrom-Json
+  } finally {
+    Remove-Item $resultPath -Force -ErrorAction SilentlyContinue
+  }
+  if (-not $result.ClientId) { throw 'L''étape Entra n''a pas renvoyé de Client ID.' }
   $state.entraClientId = $result.ClientId
+  if ($result.InitialDomain) { $state.tenantInitialDomain = $result.InitialDomain }
   Save-State
 
-  if ($state.deployedEntraClientId -ne $state.entraClientId) {
-    Write-Host 'Client ID nouveau : second passage Infra pour le transmettre à l''application.'
+  if ($state.deployedEntraClientId -ne $state.entraClientId -or $state.deployedTenantInitialDomain -ne $state.tenantInitialDomain) {
+    Write-Host 'Nouvelles valeurs Entra : second passage Infra pour les transmettre à l''application et au runbook.'
     Step-Infra -allowNewSecret $false
   }
 }
 
 function Step-Exchange {
   Write-Step 'Exchange Online'
-  & (Join-Path $PSScriptRoot '02-exchange.ps1') `
-    -TenantId $cfg.TenantId `
-    -OrganizerUpn $cfg.OrganizerUpn `
-    -ManagedIdentityClientId $state.managedIdentityClientId `
-    -ManagedIdentityPrincipalId $state.managedIdentityPrincipalId `
-    -InstanceName $cfg.InstanceName `
-    -OrganizerAttributeNumber $cfg.OrganizerAttributeNumber `
-    -FixRoomProcessing:($cfg.FixRoomProcessing)
+  if (-not $state.managedIdentityPrincipalId) { throw 'Lancez d''abord l''étape Infra.' }
+  $arguments = @(
+    '-TenantId', $cfg.TenantId,
+    '-OrganizerUpn', $cfg.OrganizerUpn,
+    '-ManagedIdentityClientId', $state.managedIdentityClientId,
+    '-ManagedIdentityPrincipalId', $state.managedIdentityPrincipalId,
+    '-InstanceName', $cfg.InstanceName,
+    '-OrganizerAttributeNumber', [string]$cfg.OrganizerAttributeNumber
+  )
+  if ($cfg.FixRoomProcessing) { $arguments += '-FixRoomProcessing' }
+  if ($state.syncIdentityPrincipalId) { $arguments += @('-SyncClientId', $state.syncIdentityClientId, '-SyncPrincipalId', $state.syncIdentityPrincipalId) }
+  $resultPath = Join-Path ([IO.Path]::GetTempPath()) "roomportal-exchange-$([guid]::NewGuid()).json"
+  $arguments += @('-ResultPath', $resultPath)
+  try {
+    Invoke-IsolatedScript '02-exchange.ps1' $arguments
+    $rooms = @((Get-Content $resultPath -Raw | ConvertFrom-Json).rooms)
+  } finally {
+    Remove-Item $resultPath -Force -ErrorAction SilentlyContinue
+  }
+  $state.roomDirectory = ConvertTo-Json -InputObject $rooms -Compress -Depth 4
+  Save-State
+  Write-Host "$($rooms.Count) salle(s) relevée(s) dans Exchange."
+
+  if ($state.deployedRoomDirectory -ne $state.roomDirectory) {
+    Write-Host 'Annuaire des salles modifié : passage Infra pour le transmettre à l''application.'
+    Step-Infra -allowNewSecret $false
+  }
+  Start-RoomSync
 }
 
 function Step-Teams {
   Write-Step 'Teams'
-  & (Join-Path $PSScriptRoot '03-teams.ps1') -TenantId $cfg.TenantId -OrganizerUpn $cfg.OrganizerUpn -InstanceName $cfg.InstanceName
+  Invoke-IsolatedScript '03-teams.ps1' @('-TenantId', $cfg.TenantId, '-OrganizerUpn', $cfg.OrganizerUpn, '-InstanceName', $cfg.InstanceName)
+}
+
+# Publication OneDeploy sur le point SCM de l'App Service avec un jeton Entra ID (l'authentification
+# de base est désactivée). L'envoi passe par .NET plutôt que par « az webapp deploy » : il utilise le
+# magasin de certificats du système, ce qui fonctionne derrière un proxy d'inspection TLS d'entreprise.
+function Publish-Package([string] $package) {
+  $site = Invoke-AzJson webapp show --resource-group $cfg.ResourceGroup --name $state.appName
+  $scmHost = ($site.hostNameSslStates | Where-Object hostType -eq 'Repository' | Select-Object -First 1).name
+  if (-not $scmHost) { throw "Point de publication SCM introuvable pour $($state.appName)." }
+  $headers = @{ Authorization = "Bearer $(Invoke-Az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)" }
+
+  Write-Host "Envoi du paquet ($([math]::Round((Get-Item $package).Length / 1MB, 1)) Mo) vers $scmHost…"
+  $response = Invoke-WebRequest -Method Post -Uri "https://$scmHost/api/publish?type=zip&async=true" -InFile $package `
+    -ContentType 'application/zip' -Headers $headers -TimeoutSec 900 -SkipHttpErrorCheck
+  if ($response.StatusCode -ge 400) {
+    if ($response.Headers['Cf-Team'] -or "$($response.Headers['Server-Timing'])" -match 'cfReqDur') {
+      throw "Envoi bloqué par Cloudflare Gateway (HTTP $($response.StatusCode)) : le proxy d'entreprise coupe le téléversement du paquet vers $scmHost. Déployez depuis GitHub Actions, ou demandez une exclusion de l'inspection pour *.scm.azurewebsites.net."
+    }
+    throw "Échec de l'envoi du paquet : HTTP $($response.StatusCode) $($response.Content)"
+  }
+
+  # Statuts Kudu : 3 = échec, 4 = succès.
+  for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Seconds 5
+    $deployment = Invoke-RestMethod -Uri "https://$scmHost/api/deployments/latest" -Headers $headers -TimeoutSec 30
+    if ($deployment.status -eq 4) { Write-Host 'Paquet déployé.'; return }
+    if ($deployment.status -eq 3) { throw "Échec du déploiement : $($deployment.status_text) — détail : https://$scmHost/api/deployments/$($deployment.id)/log" }
+  }
+  throw 'Le déploiement ne s''est pas terminé en 5 minutes.'
 }
 
 function Step-App {
   Write-Step 'Application'
   if (-not $state.appName) { throw 'Lancez d''abord l''étape Infra.' }
   if (-not $state.entraClientId) { Write-Warning 'Entra ID n''est pas encore configuré : l''application ne démarrera pas tant que l''étape Entra n''a pas été jouée.' }
-  $package = if ($PackagePath) { (Resolve-Path $PackagePath).Path } else { & (Join-Path $PSScriptRoot 'build-package.ps1') }
-  Invoke-Az webapp deploy --resource-group $cfg.ResourceGroup --name $state.appName --src-path $package --type zip | Out-Null
+  $package = if ($PackagePath) { (Resolve-Path $PackagePath).Path } else { & (Join-Path $PSScriptRoot 'build-package.ps1') | Select-Object -Last 1 }
+  Publish-Package $package
 
   if ($state.entraClientId) {
-    for ($i = 0; $i -lt 18; $i++) {
+    # L'ancien conteneur répond encore quelques secondes après la publication : on attend la version du paquet.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($package)
+    try {
+      $entry = $zip.GetEntry('version.txt')
+      $expected = if ($entry) { $reader = [IO.StreamReader]::new($entry.Open()); try { $reader.ReadToEnd().Trim() } finally { $reader.Dispose() } }
+    } finally { $zip.Dispose() }
+
+    for ($i = 0; $i -lt 24; $i++) {
       try {
-        if ((Invoke-WebRequest "$($state.appUrl)/healthz" -TimeoutSec 10 -SkipHttpErrorCheck).StatusCode -eq 200) { Write-Host "En ligne : $($state.appUrl)"; return }
+        $health = Invoke-RestMethod "$($state.appUrl)/healthz" -TimeoutSec 10
+        if ($health.status -eq 'ok' -and (-not $expected -or $health.version -eq $expected)) {
+          Write-Host "En ligne : $($state.appUrl) (version $($health.version))"
+          return
+        }
       } catch { }
       Start-Sleep -Seconds 10
     }
-    Write-Warning 'L''application ne répond pas encore : consultez les journaux (az webapp log tail).'
+    Write-Warning "La nouvelle version ($expected) n'est pas encore active : consultez les journaux de l'App Service."
   }
 }
 
@@ -281,5 +447,6 @@ foreach ($step in 'Prerequisites', 'Infra', 'Entra', 'Exchange', 'Teams', 'App')
   if ($step -in $Steps) { & "Step-$step" }
 }
 
-Write-Host "`nTerminé. État enregistré dans $statePath" -ForegroundColor Green
+Write-Host "`nTerminé." -ForegroundColor Green
+if (Test-Path $statePath) { Write-Host "État de l'installation : $statePath" }
 if ('Exchange' -in $Steps) { Write-Host 'Rappel : Exchange RBAC for Applications peut mettre jusqu''à 2 h à se propager.' }

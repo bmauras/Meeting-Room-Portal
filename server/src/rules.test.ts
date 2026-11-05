@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeAttendees, sanitizeSubject, validateSlot, type BookingRules } from './rules.js';
-import { addDays, nowLocal } from './time.js';
+import { addDays, formatLongDate, nowLocal } from './time.js';
 
 const rules: BookingRules = {
   timeZone: 'Europe/Paris',
@@ -52,8 +52,17 @@ test('participants : domaines autorisés uniquement', () => {
   assert.equal(normalizeAttendees(['not-an-email'], rules, 'me@partner.com').ok, false);
 });
 
+test('participants : « * » accepte tout domaine, avec un maximum de 10', () => {
+  const open = { ...rules, allowedAttendeeDomains: ['*'] };
+  assert.deepEqual(normalizeAttendees(['x@gmail.com', 'y@other.org'], open, 'me@partner.com'), { ok: true, value: ['x@gmail.com', 'y@other.org'] });
+  assert.equal(normalizeAttendees(['not-an-email'], open, 'me@partner.com').ok, false);
+  const eleven = Array.from({ length: 11 }, (_, i) => `p${i}@example.com`);
+  assert.equal(normalizeAttendees(eleven, open, 'me@partner.com').ok, false);
+});
+
 test('helpers de date', () => {
   assert.equal(addDays('2026-12-31', 1), '2027-01-01');
+  assert.equal(formatLongDate('2026-11-04'), 'mercredi 4 novembre 2026');
   assert.equal(nowLocal('Europe/Paris', new Date('2026-07-01T08:30:00Z')), '2026-07-01T10:30');
   assert.equal(nowLocal('Europe/Paris', new Date('2026-12-01T08:30:00Z')), '2026-12-01T09:30');
 });

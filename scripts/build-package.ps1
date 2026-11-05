@@ -39,6 +39,9 @@ try {
   Copy-Item (Join-Path $server 'dist') (Join-Path $staging 'dist') -Recurse
   Copy-Item (Join-Path $server 'package.json'), (Join-Path $server 'package-lock.json') $staging
   Copy-Item (Join-Path $web 'dist') (Join-Path $staging 'public') -Recurse
+  # Version renvoyée par /healthz : deploy.ps1 attend qu'elle soit active avant de conclure.
+  "$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 8))" |
+    Set-Content (Join-Path $staging 'version.txt') -NoNewline -Encoding utf8NoBOM
   # Sans liens symboliques (.bin) pour une archive portable Windows → Linux.
   Invoke-Npm $staging @('ci', '--omit=dev', '--ignore-scripts', '--no-bin-links')
 

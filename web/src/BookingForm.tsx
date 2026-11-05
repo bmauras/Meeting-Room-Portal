@@ -1,149 +1,254 @@
-import { useEffect, useMemo, useState } from 'react';
-import { api, type Booking, type BusySlot, type Me, type Room } from './api';
-import { formatDate, fromMinutes, timeSlots, toMinutes } from './time';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { api, ApiError, type Booking, type BusySlot, type Me, type Room } from './api';
+import { addEmails, EmailChips } from './EmailChips';
+import { availableStarts, latestEnd } from './slots';
+import { formatDuration, fromMinutes, toMinutes } from './time';
 
-export interface Draft {
-  roomEmail: string;
-  date: string;
-  start: string;
-}
+const MAX_ATTENDEES = 10;
+const DEFAULT_DURATION = 60;
+const SUBJECT_MAX = 80;
 
 interface Props {
   me: Me;
   rooms: Room[];
-  draft: Draft;
-  busy: BusySlot[] | null;
+  date: string;
+  initialRoom: string;
+  /** Heure de début proposée ('HH:mm'), ou null pour le premier créneau libre. */
+  initialStart: string | null;
+  busyByRoom: Map<string, BusySlot[] | null>;
+  /** Heure courante 'HH:mm' si `date` est aujourd'hui. */
+  now: string | null;
   onCancel: () => void;
   onBooked: (booking: Booking) => void;
+  /** Le créneau a été pris entre-temps : le planning doit être relu. */
+  onConflict: () => void;
 }
 
-export function BookingForm({ me, rooms, draft, busy, onCancel, onBooked }: Props) {
+export function BookingForm({ me, rooms, date, initialRoom, initialStart, busyByRoom, now, onCancel, onBooked, onConflict }: Props) {
   const { rules } = me;
-  const [roomEmail, setRoomEmail] = useState(draft.roomEmail);
-  const [start, setStart] = useState(draft.start);
-  const [end, setEnd] = useState(() => defaultEnd(draft.start));
+  const ids = { room: useId(), start: useId(), duration: useId(), subject: useId(), subjectHint: useId(), subjectError: useId() };
+
+  const startsByRoom = useMemo(
+    () => new Map(rooms.map((r) => [r.email, availableStarts(busyByRoom.get(r.email), date, now, rules)])),
+    [rooms, busyByRoom, date, now, rules],
+  );
+
+  const [roomEmail, setRoomEmail] = useState(initialRoom);
+  const starts = startsByRoom.get(roomEmail) ?? [];
+  const [start, setStart] = useState(() => (initialStart && starts.includes(initialStart) ? initialStart : (starts[0] ?? '')));
+  const [duration, setDuration] = useState(DEFAULT_DURATION);
   const [subject, setSubject] = useState('');
-  const [attendees, setAttendees] = useState('');
+  const [attendees, setAttendees] = useState<string[]>([]);
+  const [attendeeDraft, setAttendeeDraft] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subjectError, setSubjectError] = useState<string | null>(null);
 
-  function defaultEnd(from: string) {
-    return fromMinutes(Math.min(toMinutes(from) + 60, toMinutes(rules.dayEnd)));
-  }
+  const [slotNotice, setSlotNotice] = useState<string | null>(null);
+  const previousRoom = useRef(roomEmail);
 
+  // Le créneau choisi n'est plus libre : premier créneau libre. Si la salle n'a pas changé, c'est
+  // qu'il vient d'être réservé par quelqu'un d'autre : on le dit plutôt que de changer en silence.
   useEffect(() => {
-    setRoomEmail(draft.roomEmail);
-    setStart(draft.start);
-    setEnd(defaultEnd(draft.start));
-    setError(null);
-  }, [draft]);
+    const roomChanged = previousRoom.current !== roomEmail;
+    previousRoom.current = roomEmail;
+    if (starts.includes(start)) return;
+    const next = starts[0] ?? '';
+    if (!roomChanged && start) {
+      setSlotNotice(
+        next
+          ? `Le créneau de ${start} vient d’être réservé par quelqu’un d’autre. Prochain créneau libre proposé : ${next}.`
+          : `Le créneau de ${start} vient d’être réservé par quelqu’un d’autre, et il n’y a plus de créneau libre dans cette salle.`,
+      );
+    } else {
+      setSlotNotice(null);
+    }
+    setStart(next);
+  }, [starts, start, roomEmail]);
 
-  const slots = useMemo(() => timeSlots(rules.dayStart, rules.dayEnd, rules.slotMinutes), [rules]);
-  const endSlots = slots.filter((t) => toMinutes(t) > toMinutes(start) && toMinutes(t) - toMinutes(start) <= rules.maxDurationMinutes);
-  const conflict =
-    roomEmail === draft.roomEmail &&
-    busy?.some((b) => b.start < `${draft.date}T${end}` && b.end > `${draft.date}T${start}`);
+  const busy = busyByRoom.get(roomEmail) ?? [];
+  const maxEnd = start ? latestEnd(busy, date, start, rules) : 0;
+  const durations = useMemo(() => {
+    const list: number[] = [];
+    if (start) for (let d = rules.slotMinutes; toMinutes(start) + d <= maxEnd; d += rules.slotMinutes) list.push(d);
+    return list;
+  }, [start, maxEnd, rules.slotMinutes]);
+  const effectiveDuration = durations.includes(duration) ? duration : (durations[durations.length - 1] ?? 0);
+  const end = start ? fromMinutes(toMinutes(start) + effectiveDuration) : '';
+
+  const selectedRoom = rooms.find((r) => r.email === roomEmail);
+  const anyDomain = rules.allowedAttendeeDomains.includes('*');
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    const trimmed = subject.trim();
+    if (trimmed.length < 3) {
+      setSubjectError('Indiquez un objet d’au moins 3 caractères.');
+      document.getElementById(ids.subject)?.focus();
+      return;
+    }
+    // Adresse encore en cours de saisie : ajoutée avant l'envoi.
+    let finalAttendees = attendees;
+    if (attendeeDraft.trim()) {
+      const result = addEmails(attendeeDraft, attendees, { allowedDomains: rules.allowedAttendeeDomains, max: MAX_ATTENDEES, self: me.user.email });
+      if (result.error) {
+        setError(result.error);
+        return;
+      }
+      finalAttendees = result.emails;
+      setAttendees(result.emails);
+      setAttendeeDraft('');
+    }
+
     setSubmitting(true);
     setError(null);
     try {
-      const booking = await api.createBooking({
-        roomEmail,
-        start: `${draft.date}T${start}`,
-        end: `${draft.date}T${end}`,
-        subject,
-        attendees: attendees.split(/[\s,;]+/).filter(Boolean),
-      });
+      const booking = await api.createBooking({ roomEmail, start: `${date}T${start}`, end: `${date}T${end}`, subject: trimmed, attendees: finalAttendees });
       onBooked(booking);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erreur inattendue.');
-    } finally {
       setSubmitting(false);
+      if (err instanceof ApiError && err.status === 409) {
+        // Réservé entre-temps : le planning est relu et le formulaire propose un autre créneau.
+        setError(null);
+        onConflict();
+        return;
+      }
+      setError(err instanceof Error ? err.message : 'Erreur inattendue.');
     }
   }
 
+  const noSlot = starts.length === 0;
+
   return (
-    <form className="card booking-form" onSubmit={submit}>
-      <h2>Nouvelle réservation</h2>
-      <p className="muted">{formatDate(draft.date)}</p>
+    <form className="booking-form" onSubmit={submit} noValidate>
+      <div className="form-grid">
+        <div className="field span-2">
+          <label htmlFor={ids.room}>Salle</label>
+          <select id={ids.room} value={roomEmail} onChange={(e) => setRoomEmail(e.target.value)}>
+            {rooms.map((r) => {
+              const full = (startsByRoom.get(r.email) ?? []).length === 0;
+              return (
+                <option key={r.email} value={r.email} disabled={full}>
+                  {r.name}
+                  {r.capacity ? ` · ${r.capacity} pers.` : ''}
+                  {full ? ' · complète' : ''}
+                </option>
+              );
+            })}
+          </select>
+          {selectedRoom && (selectedRoom.hasVideo || selectedRoom.hasDisplay || selectedRoom.accessible || selectedRoom.building) && (
+            <p className="hint">
+              {[selectedRoom.building, selectedRoom.floor, selectedRoom.hasVideo && 'Visioconférence', selectedRoom.hasDisplay && 'Écran', selectedRoom.accessible && 'Accessible PMR']
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          )}
+        </div>
 
-      <label>
-        Salle
-        <select value={roomEmail} onChange={(e) => setRoomEmail(e.target.value)}>
-          {rooms.map((r) => (
-            <option key={r.email} value={r.email}>
-              {r.name}
-              {r.capacity ? ` (${r.capacity} pers.)` : ''}
-            </option>
-          ))}
-        </select>
-      </label>
+        {slotNotice && (
+          <p className="callout callout-warning span-2" role="alert">
+            {slotNotice}
+          </p>
+        )}
 
-      <div className="row">
-        <label>
-          Début
-          <select
-            value={start}
+        {noSlot ? (
+          <p className="callout callout-warning span-2">Plus aucun créneau libre dans cette salle ce jour-là. Choisissez une autre salle ou une autre date.</p>
+        ) : (
+          <>
+            <div className="field">
+              <label htmlFor={ids.start}>Début</label>
+              <select id={ids.start} value={start} onChange={(e) => setStart(e.target.value)}>
+                {starts.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor={ids.duration}>Durée</label>
+              <select id={ids.duration} value={effectiveDuration} onChange={(e) => setDuration(Number(e.target.value))}>
+                {durations.map((d) => (
+                  <option key={d} value={d}>
+                    {formatDuration(d)} · fin {fromMinutes(toMinutes(start) + d)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {maxEnd < toMinutes(rules.dayEnd) && toMinutes(start) + rules.maxDurationMinutes > maxEnd && (
+              <p className="hint span-2">La salle est réservée à partir de {fromMinutes(maxEnd)} : la durée est limitée en conséquence.</p>
+            )}
+          </>
+        )}
+
+        <div className="field span-2">
+          <label htmlFor={ids.subject}>Objet de la réunion</label>
+          <input
+            id={ids.subject}
+            data-autofocus
+            value={subject}
+            maxLength={SUBJECT_MAX}
+            autoComplete="off"
+            placeholder="Ex. : Point d’avancement projet"
+            aria-invalid={Boolean(subjectError)}
+            aria-describedby={`${ids.subjectHint}${subjectError ? ` ${ids.subjectError}` : ''}`}
             onChange={(e) => {
-              setStart(e.target.value);
-              setEnd(defaultEnd(e.target.value));
+              setSubject(e.target.value);
+              if (subjectError) setSubjectError(null);
             }}
-          >
-            {slots.slice(0, -1).map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Fin
-          <select value={end} onChange={(e) => setEnd(e.target.value)}>
-            {endSlots.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
+          />
+          <p id={ids.subjectHint} className="hint hint-split">
+            <span>Visible par les participants. Sans lien ni mise en forme.</span>
+            <span aria-hidden="true">
+              {subject.length}/{SUBJECT_MAX}
+            </span>
+          </p>
+          {subjectError && (
+            <p id={ids.subjectError} className="field-error">
+              {subjectError}
+            </p>
+          )}
+        </div>
+
+        <div className="span-2">
+          <EmailChips
+            label="Participants"
+            value={attendees}
+            onChange={setAttendees}
+            draft={attendeeDraft}
+            onDraftChange={setAttendeeDraft}
+            allowedDomains={rules.allowedAttendeeDomains}
+            max={MAX_ATTENDEES}
+            self={me.user.email}
+            hint={anyDomain ? 'Appuyez sur Entrée ou tapez une virgule après chaque adresse.' : `Domaines acceptés : ${rules.allowedAttendeeDomains.join(', ')}.`}
+          />
+        </div>
       </div>
 
-      <label>
-        Objet
-        <input value={subject} onChange={(e) => setSubject(e.target.value)} minLength={3} maxLength={80} required placeholder="Ex. : Réunion de suivi projet" />
-      </label>
+      <div className="callout callout-info">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="2" />
+          <path d="M12 11v6m0-10h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+        <p>
+          Une réunion Teams est créée automatiquement. Vous et vos participants recevez l’invitation par e-mail. Pour annuler, passez par ce
+          portail : refuser l’invitation dans Outlook ne libère pas la salle.
+        </p>
+      </div>
 
-      <label>
-        Participants supplémentaires <span className="muted small">(facultatif)</span>
-        <textarea
-          rows={2}
-          value={attendees}
-          onChange={(e) => setAttendees(e.target.value)}
-          placeholder={`prenom.nom@${rules.allowedAttendeeDomains[0] ?? 'exemple.com'}`}
-        />
-        <span className="muted small">Domaines acceptés : {rules.allowedAttendeeDomains.join(', ')}</span>
-      </label>
-
-      <p className="muted small">
-        Une réunion Teams est ajoutée automatiquement. L'invitation est envoyée à {me.user.email}. Pour annuler, utilisez ce portail
-        (refuser l'invitation dans Outlook ne libère pas la salle).
-      </p>
-
-      {conflict && <p className="alert alert-warning">Ce créneau chevauche une réservation existante.</p>}
       {error && (
-        <p className="alert alert-error" role="alert">
+        <p className="callout callout-error" role="alert">
           {error}
         </p>
       )}
 
-      <div className="row actions">
-        <button type="button" className="button button-ghost" onClick={onCancel}>
+      <div className="dialog-actions">
+        <button type="button" className="button button-ghost" onClick={onCancel} disabled={submitting}>
           Annuler
         </button>
-        <button type="submit" className="button button-primary" disabled={submitting || !end || Boolean(conflict)}>
-          {submitting ? 'Réservation…' : 'Réserver'}
+        <button type="submit" className="button button-primary" disabled={submitting || noSlot || !end}>
+          {submitting && <span className="spinner" aria-hidden="true" />}
+          {submitting ? 'Réservation en cours…' : `Réserver${start && end ? ` de ${start} à ${end}` : ''}`}
         </button>
       </div>
     </form>

@@ -19,17 +19,28 @@ param(
   [Parameter(Mandatory)] [string] $ManagedIdentityPrincipalId,
   [string] $InstanceName = 'MeetingRoomPortal',
   [ValidateRange(1, 15)] [int] $OrganizerAttributeNumber = 15,
-  [switch] $FixRoomProcessing
+  [switch] $FixRoomProcessing,
+  # Identité managée du runbook de synchronisation des salles (sorties Bicep syncIdentity*).
+  [string] $SyncClientId,
+  [string] $SyncPrincipalId,
+  # Fichier JSON où écrire l'annuaire des salles (utilisé quand le script tourne dans un processus séparé).
+  [string] $ResultPath
 )
 
 $ErrorActionPreference = 'Stop'
+# Les cmdlets Exchange Online sont des fonctions de module : elles ignorent $ErrorActionPreference.
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 #Requires -Modules ExchangeOnlineManagement
 
 $scopeName = "$InstanceName-Scope"
 $assignmentName = "$InstanceName-Calendars"
 $attribute = "CustomAttribute$OrganizerAttributeNumber"
 
-Connect-ExchangeOnline -ShowBanner:$false
+# Le courtier d'authentification Windows (WAM) échoue dans certains terminaux (VS Code) avec une
+# NullReferenceException : on lui préfère la connexion par navigateur quand le module le permet.
+$connectParams = @{ ShowBanner = $false }
+if ((Get-Command Connect-ExchangeOnline).Parameters.ContainsKey('DisableWAM')) { $connectParams.DisableWAM = $true }
+Connect-ExchangeOnline @connectParams
 
 # --- 0. Bon tenant ? -----------------------------------------------------------------------
 $connection = Get-ConnectionInformation | Where-Object State -eq 'Connected' | Select-Object -First 1
@@ -85,6 +96,19 @@ if ($notReady.Count -gt 0) {
   Write-Warning "$($notReady.Count) salle(s) ne confirmeront pas automatiquement les réservations du portail. Relancez avec -FixRoomProcessing ou corrigez-les manuellement."
 }
 
+# Annuaire des salles transmis à l'application : il complète l'API Graph Places, qui ne voit
+# les salles nouvellement créées qu'après une synchronisation pouvant prendre jusqu'à 24 h.
+$directory = @(foreach ($room in $rooms) {
+    $capacity = $null
+    try { $capacity = (Get-Place -Identity $room.PrimarySmtpAddress.ToString()).Capacity } catch { }
+    [ordered]@{
+      email    = $room.PrimarySmtpAddress.ToString().ToLowerInvariant()
+      name     = $room.DisplayName
+      capacity = if ([int]"0$capacity" -gt 0) { [int]"0$capacity" } else { $null }
+    }
+  })
+if ($ResultPath) { @{ rooms = $directory } | ConvertTo-Json -Depth 4 | Set-Content $ResultPath -Encoding utf8 }
+
 # --- 3. RBAC for Applications -------------------------------------------------------------
 if (-not (Get-ServicePrincipal -Identity $ManagedIdentityPrincipalId -ErrorAction SilentlyContinue)) {
   New-ServicePrincipal -AppId $ManagedIdentityClientId -ObjectId $ManagedIdentityPrincipalId -DisplayName "$InstanceName (Managed Identity)" | Out-Null
@@ -108,6 +132,22 @@ Get-ManagementRoleAssignment -Role 'Application Calendars.ReadWrite' |
   }
 if (-not (Get-ManagementRoleAssignment -Identity $currentAssignment -ErrorAction SilentlyContinue)) {
   New-ManagementRoleAssignment -Name $currentAssignment -App $ManagedIdentityPrincipalId -Role 'Application Calendars.ReadWrite' -CustomResourceScope $scopeName | Out-Null
+}
+
+# --- 4. Runbook de synchronisation : lecture seule des destinataires ----------------------
+if ($SyncClientId -and $SyncPrincipalId) {
+  if (-not (Get-ServicePrincipal -Identity $SyncPrincipalId -ErrorAction SilentlyContinue)) {
+    New-ServicePrincipal -AppId $SyncClientId -ObjectId $SyncPrincipalId -DisplayName "$InstanceName (synchronisation des salles)" | Out-Null
+  }
+  $roleGroup = "$InstanceName-RoomSync"
+  if (-not (Get-RoleGroup -Identity $roleGroup -ErrorAction SilentlyContinue)) {
+    New-RoleGroup -Name $roleGroup -Roles 'View-Only Recipients' -Description 'Lecture des boîtes de salle par le runbook de synchronisation du Meeting Room Portal.' | Out-Null
+  }
+  $members = @(Get-RoleGroupMember -Identity $roleGroup -ResultSize Unlimited)
+  if (-not ($members | Where-Object { $_.ExternalDirectoryObjectId -eq $SyncPrincipalId -or $_.Identity -eq $SyncPrincipalId -or $_.Name -eq $SyncPrincipalId })) {
+    Add-RoleGroupMember -Identity $roleGroup -Member $SyncPrincipalId
+  }
+  Write-Host "Synchronisation des salles : groupe de rôles $roleGroup (View-Only Recipients)."
 }
 
 Write-Host ''

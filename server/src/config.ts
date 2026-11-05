@@ -6,6 +6,26 @@ const bool = (fallback: 'true' | 'false') =>
     .enum(['true', 'false'])
     .default(fallback)
     .transform((v) => v === 'true');
+const roomDirectory = z
+  .string()
+  .default('[]')
+  .transform((s, ctx) => {
+    try {
+      return JSON.parse(s) as unknown;
+    } catch {
+      ctx.addIssue({ code: 'custom', message: 'JSON invalide' });
+      return z.NEVER;
+    }
+  })
+  .pipe(
+    z.array(
+      z.object({
+        email: z.string().email().transform((e) => e.toLowerCase()),
+        name: z.string().min(1),
+        capacity: z.number().int().positive().nullable().optional(),
+      }),
+    ),
+  );
 const csv = z
   .string()
   .default('')
@@ -33,6 +53,10 @@ const schema = z
     AZURE_CLIENT_ID: z.guid().optional(),
 
     ORGANIZER_UPN: z.string().email().transform((s) => s.toLowerCase()),
+    // Salles relevées dans Exchange au déploiement, en complément de l'API Places.
+    ROOM_DIRECTORY: roomDirectory,
+    // Identité managée du runbook qui synchronise l'annuaire des salles (seule autorisée à le mettre à jour).
+    SYNC_PRINCIPAL_ID: z.guid().optional(),
     ALLOWED_ATTENDEE_DOMAINS: csv,
 
     STORAGE_TABLE_ENDPOINT: z.string().url(),

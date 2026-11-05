@@ -49,6 +49,18 @@ param bookingRules object = {
   allowWeekends: false
 }
 
+@description('Annuaire des salles relevé dans Exchange (JSON [{email, name, capacity}]) : complète l\'API Places, lente à synchroniser les nouvelles salles.')
+param roomDirectory string = '[]'
+
+@description('Domaine initial du tenant (*.onmicrosoft.com) : connexion Exchange du runbook de synchronisation des salles. Vide au premier déploiement.')
+param tenantInitialDomain string = ''
+
+@description('Version du module ExchangeOnlineManagement importé dans Azure Automation.')
+param exchangeModuleVersion string = '3.6.0'
+
+@description('Région du compte Azure Automation (quota par région : peut différer du reste de l\'installation).')
+param automationLocation string = location
+
 @allowed(['B1', 'B2', 'P0v3', 'P1v3'])
 param appServiceSkuName string = 'B1'
 
@@ -112,15 +124,21 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
 
 // Intégration VNet sortante + service endpoints : Storage et Key Vault ne sont joignables que
 // depuis le sous-réseau de l'application, sans le coût de private endpoints.
+var vnetName = 'vnet-${baseName}'
+var appSubnetName = 'snet-app'
+// Identifiant calculé (et non lu sur la ressource) : la validation préalable du stockage et de
+// Key Vault exige une valeur connue avant le déploiement, sinon tout redéploiement est rejeté.
+var appSubnetId = resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, appSubnetName)
+
 resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
-  name: 'vnet-${baseName}'
+  name: vnetName
   location: location
   tags: tags
   properties: {
     addressSpace: { addressPrefixes: [vnetAddressPrefix] }
     subnets: [
       {
-        name: 'snet-app'
+        name: appSubnetName
         properties: {
           addressPrefix: appSubnetPrefix
           delegations: [
@@ -138,8 +156,6 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
     ]
   }
 }
-
-var appSubnetId = vnet.properties.subnets[0].id
 
 // ---------------------------------------------------------------- Données
 
@@ -165,6 +181,7 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
       ]
     }
   }
+  dependsOn: [vnet]
 }
 
 resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' = {
@@ -175,6 +192,11 @@ resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-0
 resource bookingsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
   parent: tableService
   name: 'bookings'
+}
+
+resource directoryTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: tableService
+  name: 'directory'
 }
 
 resource auditTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
@@ -214,6 +236,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
       ]
     }
   }
+  dependsOn: [vnet]
 }
 
 // Écrit uniquement quand une valeur est fournie : un redéploiement sans secret conserve les sessions en cours.
@@ -291,6 +314,8 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'STORAGE_TABLE_ENDPOINT', value: storage.properties.primaryEndpoints.table }
         { name: 'SESSION_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVault.name};SecretName=session-secret)' }
         { name: 'TIME_ZONE', value: timeZone }
+        { name: 'ROOM_DIRECTORY', value: roomDirectory }
+        { name: 'SYNC_PRINCIPAL_ID', value: syncIdentity.properties.principalId }
         { name: 'BOOKING_DAY_START', value: bookingRules.dayStart }
         { name: 'BOOKING_DAY_END', value: bookingRules.dayEnd }
         { name: 'BOOKING_SLOT_MINUTES', value: string(bookingRules.slotMinutes) }
@@ -302,9 +327,23 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
     }
   }
   dependsOn: [
+    vnet
     keyVaultSecretsUser
     storageTableContributor
   ]
+}
+
+// Sorties console du conteneur conservées sur le système de fichiers (lecture immédiate via Kudu,
+// sans attendre l'ingestion Log Analytics), avec une rétention bornée.
+resource appLogs 'Microsoft.Web/sites/config@2023-12-01' = {
+  parent: app
+  name: 'logs'
+  properties: {
+    applicationLogs: { fileSystem: { level: 'Information' } }
+    httpLogs: { fileSystem: { enabled: true, retentionInDays: 7, retentionInMb: 35 } }
+    detailedErrorMessages: { enabled: false }
+    failedRequestsTracing: { enabled: false }
+  }
 }
 
 // Déploiement uniquement via Entra ID (OIDC GitHub) : pas d'identifiants FTP/SCM.
@@ -350,6 +389,75 @@ resource keyVaultDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-p
   }
 }
 
+// ---------------------------------------------------------------- Synchronisation des salles
+
+// Identité distincte de celle du portail : elle seule lit les salles dans Exchange (rôle
+// « View-Only Recipients ») et peut mettre à jour l'annuaire du portail (rôle RoomDirectory.Write).
+resource syncIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: 'id-${baseName}-sync'
+  location: location
+  tags: tags
+}
+
+resource automation 'Microsoft.Automation/automationAccounts@2023-11-01' = {
+  name: 'aa-${baseName}'
+  location: automationLocation
+  tags: tags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${syncIdentity.id}': {} }
+  }
+  properties: {
+    sku: { name: 'Basic' }
+    publicNetworkAccess: true
+    // Pas de webhooks ni de clés : seuls Entra ID et les planifications déclenchent le runbook.
+    disableLocalAuth: true
+  }
+}
+
+resource exchangeModule 'Microsoft.Automation/automationAccounts/modules@2023-11-01' = {
+  parent: automation
+  name: 'ExchangeOnlineManagement'
+  properties: {
+    contentLink: { uri: 'https://www.powershellgallery.com/api/v2/package/ExchangeOnlineManagement/${exchangeModuleVersion}' }
+  }
+}
+
+// Le runbook (contenu, publication, planifications) est géré par scripts/deploy.ps1.
+// Les valeurs des variables Automation sont des chaînes JSON, d'où les guillemets.
+resource portalUrlVariable 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+  parent: automation
+  name: 'PortalUrl'
+  properties: { value: '"${publicBaseUrl}"', isEncrypted: false }
+}
+
+resource portalAudienceVariable 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+  parent: automation
+  name: 'PortalAudience'
+  properties: { value: empty(entraClientId) ? '""' : '"api://${entraClientId}"', isEncrypted: false }
+}
+
+resource exchangeOrganizationVariable 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+  parent: automation
+  name: 'ExchangeOrganization'
+  properties: { value: '"${tenantInitialDomain}"', isEncrypted: false }
+}
+
+resource identityClientIdVariable 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = {
+  parent: automation
+  name: 'IdentityClientId'
+  properties: { value: '"${syncIdentity.properties.clientId}"', isEncrypted: false }
+}
+
+resource automationDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'to-log-analytics'
+  scope: automation
+  properties: {
+    workspaceId: logAnalytics.id
+    logs: [{ categoryGroup: 'allLogs', enabled: true }]
+  }
+}
+
 // ---------------------------------------------------------------- Sorties
 
 output appName string = app.name
@@ -359,3 +467,6 @@ output managedIdentityPrincipalId string = identity.properties.principalId
 output storageAccountName string = storage.name
 output keyVaultName string = keyVault.name
 output resourceGroupName string = resourceGroup().name
+output automationAccountName string = automation.name
+output syncIdentityClientId string = syncIdentity.properties.clientId
+output syncIdentityPrincipalId string = syncIdentity.properties.principalId

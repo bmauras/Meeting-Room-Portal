@@ -1,0 +1,16 @@
+{
+  "managedIdentityClientId": "8d1c72fb-05b3-47e9-a271-68e931da7176",
+  "managedIdentityPrincipalId": "ba5e5ec6-e420-4734-9122-2e27955615a9",
+  "updatedAt": "2026-11-05T10:18:39.2458770Z",
+  "appName": "app-roomportal-test-sbc3db",
+  "deployedEntraClientId": "f2719780-4876-4ef0-9493-6d71d84ee182",
+  "appUrl": "https://app-roomportal-test-sbc3db.azurewebsites.net",
+  "entraClientId": "f2719780-4876-4ef0-9493-6d71d84ee182",
+  "roomDirectory": "[{\"email\":\"meetingroom1@cloudfashion.fr\",\"name\":\"Meeting Room 1 Horizon365Lab\",\"capacity\":null},{\"email\":\"meetingroom2@cloudfashion.fr\",\"name\":\"Meeting Room 2 Horizon365Lab\",\"capacity\":8}]",
+  "deployedRoomDirectory": "[{\"email\":\"meetingroom1@cloudfashion.fr\",\"name\":\"Meeting Room 1 Horizon365Lab\",\"capacity\":null},{\"email\":\"meetingroom2@cloudfashion.fr\",\"name\":\"Meeting Room 2 Horizon365Lab\",\"capacity\":8}]",
+  "automationAccountName": "aa-roomportal-test-sbc3db",
+  "syncIdentityClientId": "b95e7149-904f-40b5-9b4a-837cc48391c2",
+  "syncIdentityPrincipalId": "b7106ce7-28d5-4277-bad5-f3bacae1bcc4",
+  "deployedTenantInitialDomain": "Horizon365Lab.onmicrosoft.com",
+  "tenantInitialDomain": "Horizon365Lab.onmicrosoft.com"
+}

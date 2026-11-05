@@ -1,0 +1,32 @@
+{
+  "$schema": "./deployment.schema.json",
+  "name": "test",
+  "tenantId": "20fb5534-f131-4c32-a9a1-deefca17f924",
+  "subscriptionId": "43e25472-d37b-4272-ae72-910df2c8cbad",
+  "resourceGroup": "rg-meetingroomportal-test",
+  "location": "francecentral",
+  "automationLocation": "westeurope",
+  "partner": {
+    "tenantId": "66c3e0a2-c824-4a58-8e2c-1a03c9a514c3",
+    "displayName": "Cloudfashion France",
+    "domains": ["cloudfashion.eu"]
+  },
+  "organizerUpn": "resa-externe@cloudfashion.fr",
+  "allowedAttendeeDomains": ["*"],
+  "allowInternalUsers": true,
+  "timeZone": "Europe/Paris",
+  "appServiceSku": "B1",
+  "booking": {
+    "dayStart": "08:00",
+    "dayEnd": "19:00",
+    "slotMinutes": 15,
+    "maxDurationMinutes": 240,
+    "horizonDays": 30,
+    "maxActivePerUser": 10,
+    "allowWeekends": false
+  },
+  "exchange": {
+    "organizerAttributeNumber": 15,
+    "fixRoomProcessing": false
+  }
+}

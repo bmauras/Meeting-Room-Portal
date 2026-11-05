@@ -4,7 +4,7 @@ import { ManagedIdentityCredential } from '@azure/identity';
 import type { AuditLog } from '../audit.js';
 import { authorizeUser, type IdTokenClaims } from '../authz.js';
 import type { Config } from '../config.js';
-import { requireSameOrigin, wrap } from '../http.js';
+import { clientIp, requireSameOrigin, wrap } from '../http.js';
 import type { Sessions } from '../session.js';
 
 const SCOPES = ['openid', 'profile', 'email'];
@@ -68,19 +68,22 @@ export function authRouter(deps: { config: Config; msal: ConfidentialClientAppli
 
       const { code, error } = req.query;
       if (typeof error === 'string') {
-        await audit.write({ action: 'login', outcome: 'failure', ip: req.ip, details: { error: error.slice(0, 64) } });
+        await audit.write({ action: 'login', outcome: 'failure', ip: clientIp(req), details: { error: error.slice(0, 64) } });
         return res.redirect('/?error=signin');
       }
       if (typeof code !== 'string' || !state || req.query.state !== state || !verifier) {
         return res.redirect('/?error=signin');
       }
 
-      const result = await msal.acquireTokenByCode({ code, scopes: SCOPES, redirectUri, codeVerifier: verifier });
+      if (!nonce) return res.redirect('/?error=signin');
+      // MSAL v7 compare lui-même le nonce du jeton d'identité à celui fourni ici, et rejette le
+      // jeton s'il n'en reçoit pas.
+      const result = await msal.acquireTokenByCode({ code, scopes: SCOPES, redirectUri, codeVerifier: verifier, nonce });
       // Aucun jeton n'est réutilisé : on vide le cache MSAL pour ne rien garder en mémoire.
       if (result.account) await msal.getTokenCache().removeAccount(result.account);
 
       const claims = result.idTokenClaims as IdTokenClaims & { nonce?: string };
-      if (!nonce || claims.nonce !== nonce) return res.redirect('/?error=signin');
+      if (claims.nonce !== nonce) return res.redirect('/?error=signin');
 
       const decision = authorizeUser(claims, {
         tenantId: config.TENANT_ID,
@@ -88,7 +91,7 @@ export function authRouter(deps: { config: Config; msal: ConfidentialClientAppli
         allowInternalUsers: config.ALLOW_INTERNAL_USERS,
       });
       if (!decision.ok) {
-        await audit.write({ action: 'login', outcome: 'denied', userOid: claims.oid, ip: req.ip, details: { reason: decision.reason } });
+        await audit.write({ action: 'login', outcome: 'denied', userOid: claims.oid, ip: clientIp(req), details: { reason: decision.reason } });
         return res.redirect('/?error=forbidden');
       }
 
@@ -101,7 +104,7 @@ export function authRouter(deps: { config: Config; msal: ConfidentialClientAppli
         userOid: decision.user.oid,
         userEmail: decision.user.email,
         homeTenantId: decision.user.homeTenantId,
-        ip: req.ip,
+        ip: clientIp(req),
       });
       res.redirect('/');
     }),

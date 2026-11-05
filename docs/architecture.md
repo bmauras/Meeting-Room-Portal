@@ -57,9 +57,23 @@ Portail web permettant aux utilisateurs d'**un tenant Microsoft 365 partenaire**
 - **CSRF** : cookie `SameSite=Lax`, en-tête `X-Requested-With` obligatoire et contrôle de l'`Origin` sur toute écriture.
 - **XSS** : React (échappement), CSP `default-src 'self'` sans `unsafe-inline`, `frame-ancestors 'none'`.
 - **Abus** : 120 requêtes/min par IP, 20 réservations/h par utilisateur, 10 réservations à venir max.
-- **Relais de spam** : participants additionnels limités à `ALLOWED_ATTENDEE_DOMAINS`.
-- **Phishing interne** : objet nettoyé (pas de lien, de balise ni de caractère invisible), préfixé `[Externe – Partenaire]`.
+- **Relais de spam** : participants additionnels limités à `allowedAttendeeDomains`. La valeur `["*"]` accepte toute adresse : 10 participants maximum par réservation, 20 réservations par heure et par utilisateur, et chaque adresse invitée est tracée dans le journal d'audit.
+- **Lien Teams** : l'événement est créé sans participants, le lien de la réunion est ajouté au corps, puis les participants sont invités. L'invitation n'est envoyée qu'une fois, déjà complète.
+- **Phishing interne** : objet nettoyé (pas de lien, de balise ni de caractère invisible), préfixé `[Réservation de salle – Partenaire]`.
 - **Traçabilité** : connexions (réussies/refusées), créations, annulations → table `audit` + Log Analytics.
+
+## Synchronisation des salles
+
+Une salle créée ou supprimée dans Exchange apparaît ou disparaît du portail en **15 minutes au plus**, sans redéploiement. L'API Graph Places, elle, peut mettre jusqu'à 24 h.
+
+1. Le runbook Azure Automation `Sync-RoomDirectory` (toutes les 15 min, quatre planifications horaires décalées) lit `Get-Mailbox -RecipientTypeDetails RoomMailbox` (nom, adresse, capacité).
+2. Il utilise **sa propre identité managée** (`id-…-sync`), distincte de celle du portail :
+   - Exchange : membre du groupe de rôles `MeetingRoomPortal-<nom>-RoomSync`, limité à **View-Only Recipients** ; la permission `Exchange.ManageAsApp` sert uniquement à ouvrir la session ;
+   - portail : rôle d'application `RoomDirectory.Write`, et rien d'autre.
+3. Il envoie l'annuaire à `POST /api/internal/room-directory`. Le portail vérifie la signature du jeton Entra ID, l'émetteur (notre tenant), l'audience (le portail), le rôle et l'identité exacte du runbook.
+4. Le portail enregistre l'annuaire dans la table `directory`. Tant qu'il a moins de 2 h, il **fait foi** : Places ne sert qu'à enrichir (bâtiment, équipements). Au-delà, le portail revient à Places, complété par l'annuaire.
+
+Le portail exposé sur Internet ne reçoit aucun droit supplémentaire. Le coût est d'environ 5 €/mois de minutes Automation. La région du compte Automation est configurable (`automationLocation`), car le quota de comptes s'applique par région.
 
 ## Portabilité entre tenants
 
