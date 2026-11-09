@@ -3,15 +3,15 @@
   "name": "urbasolar",
   "tenantId": "f0d06dbf-0170-4f85-bbfa-23405f0784d5",
   "subscriptionId": "<GUID d'un abonnement Azure de ce tenant>",
-  "resourceGroup": "rg-meetingroomportal",
+  "resourceGroup": "rg-roombookingportal",
   "location": "francecentral",
   "partner": {
     "tenantId": "d25e5626-3855-477c-9cac-45dd81412b79",
     "displayName": "Volkwind",
     "domains": ["volkswind.com"]
   },
-  "organizerUpn": "resa-externe@urbasolar.com",
-  "allowedAttendeeDomains": ["urbasolar.com", "volkswind.com"],
+  "organizerUpn": "booking.room@urbasolar.com",
+  "allowedAttendeeDomains": ["urbasolar.com","solar.axpo.com","volkswind.com"],
   "allowInternalUsers": true,
   "timeZone": "Europe/Paris",
   "appServiceSku": "B1",
