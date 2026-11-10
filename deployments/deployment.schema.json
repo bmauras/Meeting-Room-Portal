@@ -28,7 +28,7 @@
     "allowInternalUsers": { "description": "Recette uniquement : autorise les comptes membres du tenant.", "type": "boolean", "default": false },
     "timeZone": { "description": "Fuseau IANA des salles.", "type": "string", "default": "Europe/Paris" },
     "appServiceSku": { "enum": ["B1", "B2", "P0v3", "P1v3"], "default": "B1" },
-    "customBaseUrl": { "description": "URL https si un domaine personnalisé est configuré.", "type": "string" },
+    "customDomain": { "description": "Sous-domaine personnalisé (ex. reservation.contoso.com). Prérequis DNS : CNAME vers l'URL azurewebsites.net et TXT asuid.<domaine> ; le script les affiche. Certificat TLS managé gratuit.", "type": "string", "pattern": "^[a-z0-9-]+(\\.[a-z0-9-]+)+$" },
     "network": {
       "type": "object",
       "additionalProperties": false,

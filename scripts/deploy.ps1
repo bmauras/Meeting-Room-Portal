@@ -62,7 +62,7 @@ function Read-DeploymentConfig([string] $path) {
   & $check ($c.organizerUpn -match $email) 'organizerUpn : adresse de la boîte organisatrice.'
   & $check ($attendeeDomains.Count -gt 0 -and -not ($attendeeDomains | Where-Object { $_ -ne '*' -and $_ -notmatch $domain })) 'allowedAttendeeDomains : liste de domaines, ou ["*"] pour tout domaine.'
   if ($c.namePrefix) { & $check ($c.namePrefix -cmatch '^[a-z0-9]{1,10}$') 'namePrefix : 1 à 10 caractères, minuscules et chiffres.' }
-  if ($c.customBaseUrl) { & $check ($c.customBaseUrl -match '^https://') 'customBaseUrl : URL https.' }
+  if ($c.customDomain) { & $check ($c.customDomain -match '^(?=.{4,253}$)([a-z0-9]([a-z0-9-]*[a-z0-9])?\.){2,}[a-z]{2,}$' -and $c.customDomain -cmatch '^[a-z0-9.-]+$' -and $c.customDomain -notlike '*.azurewebsites.net') 'customDomain : sous-domaine en minuscules (ex. reservation.contoso.com), pas de domaine racine ni azurewebsites.net.' }
 
   if ($errors.Count) { throw "Configuration invalide ($path) :`n  - $($errors -join "`n  - ")" }
 
@@ -86,7 +86,7 @@ function Read-DeploymentConfig([string] $path) {
     AllowInternalUsers       = [bool]$c.allowInternalUsers
     TimeZone                 = $c.timeZone ?? 'Europe/Paris'
     AppServiceSku            = $c.appServiceSku ?? 'B1'
-    CustomBaseUrl            = $c.customBaseUrl ?? ''
+    CustomDomain             = $c.customDomain ?? ''
     VnetAddressPrefix        = $c.network.vnetAddressPrefix ?? '10.60.0.0/24'
     AppSubnetPrefix          = $c.network.appSubnetPrefix ?? '10.60.0.0/26'
     Booking                  = $booking
@@ -146,6 +146,39 @@ function Step-Prerequisites {
   Write-Host 'OK'
 }
 
+# Enregistrements DNS attendus pour le domaine personnalisé.
+function Show-CustomDomainDnsRecords {
+  $target = ([uri]$state.defaultAppUrl).Host
+  Write-Host "`nDomaine personnalisé $($cfg.CustomDomain) : créez ces enregistrements DNS, puis relancez  ./scripts/deploy.ps1 -Config <fichier> -Steps Infra,Entra,App" -ForegroundColor Yellow
+  Write-Host "  CNAME  $($cfg.CustomDomain)  ->  $target"
+  Write-Host "  TXT    asuid.$($cfg.CustomDomain)  =  $($state.customDomainVerificationId)"
+  Write-Host '  (si le domaine passe par Cloudflare, désactiver le proxy « nuage orange » le temps de l''émission du certificat)'
+}
+
+function Test-CustomDomainDns {
+  # L'identifiant de vérification et le nom d'hôte par défaut ne sont connus qu'après un premier passage Infra.
+  if (-not $state.defaultAppUrl -or -not $state.customDomainVerificationId) {
+    Write-Host "Domaine personnalisé $($cfg.CustomDomain) : liaison à l'issue du premier passage Infra, une fois le DNS créé."
+    return $false
+  }
+  $target = ([uri]$state.defaultAppUrl).Host
+  try {
+    $cname = @(Resolve-DnsName $cfg.CustomDomain -Type CNAME -ErrorAction Stop | Where-Object Type -eq 'CNAME')
+    $txt = @(Resolve-DnsName "asuid.$($cfg.CustomDomain)" -Type TXT -ErrorAction Stop | Where-Object Type -eq 'TXT')
+  } catch {
+    Show-CustomDomainDnsRecords
+    return $false
+  }
+  $cnameOk = [bool]($cname | Where-Object { $_.NameHost.TrimEnd('.') -ieq $target })
+  $txtOk = [bool]($txt | Where-Object { $_.Strings -contains $state.customDomainVerificationId })
+  if (-not ($cnameOk -and $txtOk)) {
+    Show-CustomDomainDnsRecords
+    return $false
+  }
+  Write-Host "DNS de $($cfg.CustomDomain) vérifié : liaison du domaine et certificat managé."
+  $true
+}
+
 function Step-Infra([bool] $allowNewSecret = $true) {
   Write-Step "Infrastructure Azure ($($cfg.ResourceGroup))"
   $account = Invoke-AzJson account show
@@ -161,8 +194,15 @@ function Step-Infra([bool] $allowNewSecret = $true) {
     Invoke-Az group create --name $cfg.ResourceGroup --location $cfg.Location --tags application=meeting-room-portal "environment=$($cfg.Name)" | Out-Null
   }
 
+  # Domaine personnalisé : il n'est lié que si le DNS est prêt (CNAME + TXT asuid), sinon Azure refuse la
+  # liaison. L'application garde alors l'URL azurewebsites.net ; relancer Infra,Entra une fois le DNS créé.
+  $bindCustomDomain = $false
+  if ($cfg.CustomDomain) {
+    $bindCustomDomain = ($state.customDomainBound -eq $true) -or (Test-CustomDomainDns)
+  }
+
   $parameters = [ordered]@{
-    namePrefix             = $cfg.NamePrefix
+    namePrefix            = $cfg.NamePrefix
     environmentName        = $cfg.Name
     location               = $cfg.Location
     partnerTenantId        = $cfg.PartnerTenantId
@@ -170,7 +210,8 @@ function Step-Infra([bool] $allowNewSecret = $true) {
     entraClientId          = $state.entraClientId ?? ''
     organizerUpn           = $cfg.OrganizerUpn
     allowedAttendeeDomains = ($cfg.AllowedAttendeeDomains -join ',')
-    customBaseUrl          = $cfg.CustomBaseUrl
+    customDomain           = $cfg.CustomDomain
+    bindCustomDomain       = $bindCustomDomain
     allowInternalUsers     = $cfg.AllowInternalUsers
     bookingRules           = $cfg.Booking
     appServiceSkuName      = $cfg.AppServiceSku
@@ -213,6 +254,10 @@ function Step-Infra([bool] $allowNewSecret = $true) {
 
   $state.appName = $outputs.appName.value
   $state.appUrl = $outputs.appUrl.value
+  $state.defaultAppUrl = $outputs.defaultAppUrl.value
+  if ($bindCustomDomain) { $state.customDomainBound = $true }
+  $state.customDomainVerificationId = $outputs.customDomainVerificationId.value
+  if ($cfg.CustomDomain -and -not $bindCustomDomain) { Show-CustomDomainDnsRecords }
   $state.managedIdentityClientId = $outputs.managedIdentityClientId.value
   $state.managedIdentityPrincipalId = $outputs.managedIdentityPrincipalId.value
   $state.automationAccountName = $outputs.automationAccountName.value
@@ -307,6 +352,7 @@ function Step-Entra {
   $arguments = @(
     '-TenantId', $cfg.TenantId,
     '-AppUrl', $state.appUrl,
+    '-DefaultAppUrl', $state.defaultAppUrl,
     '-ManagedIdentityPrincipalId', $state.managedIdentityPrincipalId,
     '-PartnerTenantId', $cfg.PartnerTenantId,
     '-PartnerDomains', ($cfg.PartnerDomains -join ','),
@@ -416,7 +462,7 @@ function Step-App {
 
     for ($i = 0; $i -lt 24; $i++) {
       try {
-        $health = Invoke-RestMethod "$($state.appUrl)/healthz" -TimeoutSec 10
+        $health = Invoke-RestMethod "$($state.defaultAppUrl ?? $state.appUrl)/healthz" -TimeoutSec 10
         if ($health.status -eq 'ok' -and (-not $expected -or $health.version -eq $expected)) {
           Write-Host "En ligne : $($state.appUrl) (version $($health.version))"
           return

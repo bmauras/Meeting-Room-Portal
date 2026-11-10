@@ -80,6 +80,15 @@ app.disable('x-powered-by');
 // Derrière le frontal App Service : req.ip est l'IP cliente réelle.
 app.set('trust proxy', 1);
 
+// Défense en profondeur : App Service redirige déjà HTTP vers HTTPS (httpsOnly) ; cette règle couvre un
+// accès direct au conteneur. /healthz reste joignable pour la sonde interne.
+if (config.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.secure || req.path === '/healthz') return next();
+    res.redirect(308, `${config.PUBLIC_BASE_URL}${req.originalUrl}`);
+  });
+}
+
 app.use(
   helmet({
     contentSecurityPolicy: {

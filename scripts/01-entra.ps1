@@ -20,6 +20,8 @@
 param(
   [Parameter(Mandatory)] [string] $TenantId,
   [Parameter(Mandatory)] [string] $AppUrl,
+  # URL azurewebsites.net, conservée comme redirection quand AppUrl est un domaine personnalisé.
+  [string] $DefaultAppUrl,
   [Parameter(Mandatory)] [string] $ManagedIdentityPrincipalId,
   [Parameter(Mandatory)] [string] $PartnerTenantId,
   [Parameter(Mandatory)] [string[]] $PartnerDomains,
@@ -78,6 +80,7 @@ $graphSp = Get-MgServicePrincipal -Filter "appId eq '$graphAppId'"
 
 # --- 1. App registration -------------------------------------------------------------------
 $redirectUris = @("$AppUrl/auth/callback")
+if ($DefaultAppUrl -and $DefaultAppUrl.TrimEnd('/') -ne $AppUrl) { $redirectUris += "$($DefaultAppUrl.TrimEnd('/'))/auth/callback" }
 if ($IncludeLocalhostRedirect) { $redirectUris += 'http://localhost:5173/auth/callback' }
 
 $oidcScopes = @('openid', 'profile', 'email') | ForEach-Object {

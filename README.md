@@ -60,6 +60,22 @@ Relancer le script est sans risque : tout est idempotent. Les options utiles :
 
 > Exchange RBAC for Applications peut mettre jusqu'à 2 h à se propager. D'ici là, l'application renvoie « service de calendrier indisponible ».
 
+### Domaine personnalisé
+
+Ajouter `"customDomain": "reservation.contoso.com"` (sous-domaine, pas de domaine racine) dans `deployments/<nom>.json`, puis :
+
+1. Lancer `./scripts/deploy.ps1 -Config deployments/<nom>.json -Steps Infra`. Si le DNS n'est pas prêt, le script affiche les deux enregistrements à créer et laisse l'application sur l'URL `azurewebsites.net` :
+   - `CNAME reservation.contoso.com → app-…azurewebsites.net`
+   - `TXT asuid.reservation.contoso.com = <identifiant de vérification>`
+2. Une fois le DNS propagé, relancer `-Steps Infra,Entra,App`. Le script vérifie le DNS, lie le domaine, fait émettre le certificat managé gratuit (renouvelé automatiquement) et active le TLS SNI. L'URL publique de l'application devient le domaine personnalisé.
+3. L'app registration reçoit les deux redirections (`https://<domaine>/auth/callback` et l'URL `azurewebsites.net`), ce qui permet de revenir en arrière.
+
+Si le domaine passe par Cloudflare, désactiver le proxy le temps de l'émission du certificat.
+
+### HTTPS
+
+Le HTTPS est imposé à trois niveaux : `httpsOnly` sur l'App Service (redirection HTTP → HTTPS, TLS 1.2 minimum, FTP désactivé), redirection 308 côté application en production, et en-tête HSTS d'un an.
+
 ### Plusieurs installations
 
 Chaque installation a ses propres ressources Azure et ses propres objets Microsoft 365. Ceux-ci sont tous suffixés par le nom de l'installation : app registration, groupe, accès conditionnel, périmètre Exchange, stratégie Teams. On peut donc :

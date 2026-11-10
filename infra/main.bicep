@@ -28,8 +28,11 @@ param organizerUpn string
 @description('Domaines autorisés pour les participants additionnels, séparés par des virgules.')
 param allowedAttendeeDomains string
 
-@description('URL publique si un domaine personnalisé est configuré. Vide = https://<app>.azurewebsites.net')
-param customBaseUrl string = ''
+@description('Nom d\'hôte personnalisé (ex. reservation.contoso.com). Vide = https://<app>.azurewebsites.net')
+param customDomain string = ''
+
+@description('Lier le domaine personnalisé et émettre le certificat managé. À activer une fois le CNAME et le TXT asuid créés dans le DNS.')
+param bindCustomDomain bool = false
 
 @description('Clé de chiffrement des cookies de session (32 caractères minimum). Vide = conserver la clé déjà stockée dans Key Vault.')
 @secure()
@@ -80,7 +83,9 @@ var baseName = '${namePrefix}-${environmentName}-${suffix}'
 var appName = 'app-${baseName}'
 var storageName = take(toLower('st${namePrefix}${environmentName}${suffix}'), 24)
 var keyVaultName = take('kv-${namePrefix}-${suffix}', 24)
-var publicBaseUrl = empty(customBaseUrl) ? 'https://${appName}.azurewebsites.net' : customBaseUrl
+var defaultBaseUrl = 'https://${appName}.azurewebsites.net'
+var useCustomDomain = !empty(customDomain) && bindCustomDomain
+var publicBaseUrl = useCustomDomain ? 'https://${customDomain}' : defaultBaseUrl
 
 var roles = {
   storageTableDataContributor: '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
@@ -333,6 +338,39 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
   ]
 }
 
+// Domaine personnalisé : liaison du nom d'hôte (sans TLS), certificat managé gratuit, puis activation
+// du TLS SNI dans un module (une même ressource ne peut pas être déclarée deux fois dans un fichier).
+resource hostBinding 'Microsoft.Web/sites/hostNameBindings@2023-12-01' = if (useCustomDomain) {
+  parent: app
+  name: customDomain
+  properties: {
+    hostNameType: 'Verified'
+    siteName: app.name
+    customHostNameDnsRecordType: 'CName'
+    sslState: 'Disabled'
+  }
+}
+
+resource managedCertificate 'Microsoft.Web/certificates@2023-12-01' = if (useCustomDomain) {
+  name: 'cert-${take(replace(customDomain, '.', '-'), 60)}'
+  location: location
+  tags: tags
+  properties: {
+    serverFarmId: plan.id
+    canonicalName: customDomain
+  }
+  dependsOn: [hostBinding]
+}
+
+module hostBindingTls 'modules/hostname-tls.bicep' = if (useCustomDomain) {
+  name: 'hostname-tls'
+  params: {
+    appName: app.name
+    hostName: customDomain
+    thumbprint: managedCertificate.?properties.thumbprint ?? ''
+  }
+}
+
 // Sorties console du conteneur conservées sur le système de fichiers (lecture immédiate via Kudu,
 // sans attendre l'ingestion Log Analytics), avec une rétention bornée.
 resource appLogs 'Microsoft.Web/sites/config@2023-12-01' = {
@@ -462,6 +500,8 @@ resource automationDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01
 
 output appName string = app.name
 output appUrl string = publicBaseUrl
+output defaultAppUrl string = defaultBaseUrl
+output customDomainVerificationId string = app.properties.customDomainVerificationId
 output managedIdentityClientId string = identity.properties.clientId
 output managedIdentityPrincipalId string = identity.properties.principalId
 output storageAccountName string = storage.name
