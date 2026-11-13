@@ -51,7 +51,8 @@ const rules: BookingRules = {
 };
 
 const graph = new GraphClient(credential, config.TIME_ZONE);
-const rooms = new RoomService(graph, config.ORGANIZER_UPN, config.TIME_ZONE, config.ROOM_DIRECTORY);
+const rooms = new RoomService(graph, config.ORGANIZER_UPN, config.TIME_ZONE, config.ROOM_DIRECTORY, config.EXCLUDED_ROOMS);
+if (config.EXCLUDED_ROOMS.length) console.log(JSON.stringify({ type: 'rooms_excluded', patterns: config.EXCLUDED_ROOMS }));
 const directoryStore = new DirectoryStore(directoryTable);
 // Dernier annuaire transmis par le runbook (prioritaire sur celui relevé au déploiement).
 try {

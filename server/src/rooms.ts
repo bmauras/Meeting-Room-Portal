@@ -40,7 +40,11 @@ const ROOMS_TTL_MS = 60 * 60 * 1000;
 // Une liste vide est souvent transitoire (synchronisation Exchange → Places) : on la relit vite.
 const EMPTY_ROOMS_TTL_MS = 2 * 60 * 1000;
 const AVAILABILITY_TTL_MS = 30 * 1000;
-const SCHEDULE_BATCH = 20;
+// Petits lots interrogés en parallèle : une salle lente ne retient que son lot, et la durée totale
+// reste celle du lot le plus lent.
+const SCHEDULE_BATCH = 10;
+const SCHEDULE_CONCURRENCY = 4;
+const ROOM_LIST_CONCURRENCY = 4;
 const BUSY_STATUSES = new Set(['busy', 'tentative', 'oof']);
 // Largement au-delà du délai de traitement d'une salle (quelques secondes à une minute).
 const RECENT_CHANGE_TTL_MS = 10 * 60 * 1000;
@@ -96,19 +100,51 @@ function directoryToRoom(d: DirectoryRoom, place: Room | undefined): Room {
 // Au-delà, le runbook (toutes les 15 min) est considéré en panne : retour à Places + annuaire.
 const DIRECTORY_FRESH_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * Salles exclues du portail : adresses exactes, ou motifs où « * » remplace n'importe quelle suite
+ * de caractères (ex. « *-labo@contoso.com », « *@site-b.contoso.com »). Casse ignorée.
+ */
+export function roomExclusion(patterns: string[]): (email: string) => boolean {
+  const exact = new Set<string>();
+  const wildcards: RegExp[] = [];
+  for (const raw of patterns) {
+    const pattern = raw.trim().toLowerCase();
+    if (!pattern) continue;
+    if (!pattern.includes('*')) exact.add(pattern);
+    else wildcards.push(new RegExp(`^${pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`));
+  }
+  return (email) => {
+    const e = email.toLowerCase();
+    return exact.has(e) || wildcards.some((w) => w.test(e));
+  };
+}
+
+/** Exécute `fn` sur chaque élément, au plus `limit` à la fois. */
+async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await fn(items[next++]!);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 export class RoomService {
   private rooms?: { at: number; value: Room[] };
   private loading?: Promise<Room[]>;
   private availability = new Map<string, { at: number; value: Map<string, BusySlot[] | null> }>();
   private recent = new Map<string, RecentChange>();
   private directorySyncedAt: number | null = null;
+  private readonly isExcluded: (email: string) => boolean;
 
   constructor(
     private readonly graph: GraphClient,
     private readonly organizer: string,
     private readonly timeZone: string,
     private directory: DirectoryRoom[] = [],
-  ) {}
+    excludedRooms: string[] = [],
+  ) {
+    this.isExcluded = roomExclusion(excludedRooms);
+  }
 
   /** Annuaire Exchange à jour : pris en compte immédiatement. */
   setDirectory(rooms: DirectoryRoom[], syncedAt: number | null): void {
@@ -149,10 +185,20 @@ export class RoomService {
     const merged = authoritative
       ? this.directory.map((d) => directoryToRoom(d, places.get(d.email)))
       : [...places.values(), ...fromDirectory.map((d) => directoryToRoom(d, undefined))];
-    const value = merged.filter((r) => !reserved.has(r.email)).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+    // Salles exclues par la configuration : absentes de la liste, donc ni affichées, ni interrogées,
+    // ni réservables (la création d'une réservation vérifie la salle dans cette liste).
+    const visible = merged.filter((r) => !reserved.has(r.email));
+    const value = visible.filter((r) => !this.isExcluded(r.email)).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
     this.rooms = { at: Date.now(), value };
     console.log(
-      JSON.stringify({ type: 'rooms_loaded', count: value.length, places: fromPlaces.length, directoryOnly: fromDirectory.length, source: authoritative ? 'directory' : 'places' }),
+      JSON.stringify({
+        type: 'rooms_loaded',
+        count: value.length,
+        excluded: visible.length - value.length,
+        places: fromPlaces.length,
+        directoryOnly: fromDirectory.length,
+        source: authoritative ? 'directory' : 'places',
+      }),
     );
     return value;
   }
@@ -164,12 +210,23 @@ export class RoomService {
       for (const room of rooms) if (room.emailAddress) byEmail.set(room.emailAddress.toLowerCase(), room);
     };
 
-    add(await this.graph.getAll<GraphRoom>('/places/microsoft.graph.room?$top=100'));
-    const lists = await this.graph.getAll<{ emailAddress?: string }>('/places/microsoft.graph.roomlist?$top=100');
-    for (const list of lists) {
-      if (!list.emailAddress) continue;
-      add(await this.graph.getAll<GraphRoom>(`/places/${encodeURIComponent(list.emailAddress)}/microsoft.graph.roomlist/rooms?$top=100`));
-    }
+    const [rooms, lists] = await Promise.all([
+      this.graph.getAll<GraphRoom>('/places/microsoft.graph.room?$top=100'),
+      this.graph.getAll<{ emailAddress?: string }>('/places/microsoft.graph.roomlist?$top=100'),
+    ]);
+    add(rooms);
+    // Listes lues en parallèle ; une liste en échec n'empêche pas d'afficher les autres salles.
+    await forEachLimit(
+      lists.filter((list) => list.emailAddress),
+      ROOM_LIST_CONCURRENCY,
+      async (list) => {
+        try {
+          add(await this.graph.getAll<GraphRoom>(`/places/${encodeURIComponent(list.emailAddress!)}/microsoft.graph.roomlist/rooms?$top=100`));
+        } catch (err) {
+          console.warn(JSON.stringify({ type: 'room_list_unavailable', roomList: list.emailAddress, message: (err as Error).message }));
+        }
+      },
+    );
     return [...byEmail.values()];
   }
 
@@ -185,12 +242,13 @@ export class RoomService {
     const cached = this.availability.get(date);
     if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return this.withRecentChanges(cached.value, from, to);
     const rooms = await this.listRooms();
-    const value = await this.fetchBusySlots(
+    const { value, complete } = await this.fetchBusySlots(
       rooms.map((r) => r.email),
       from,
       to,
     );
-    this.availability.set(date, { at: Date.now(), value });
+    // Résultat partiel (un lot en échec) : non mis en cache, le prochain rafraîchissement réessaie.
+    if (complete) this.availability.set(date, { at: Date.now(), value });
     return this.withRecentChanges(value, from, to);
   }
 
@@ -260,40 +318,55 @@ export class RoomService {
 
   /** `null` pour une salle dont l'occupation n'a pas pu être lue. */
   async getBusySlots(emails: string[], from: string, to: string): Promise<Map<string, BusySlot[] | null>> {
-    return this.withRecentChanges(await this.fetchBusySlots(emails, from, to), from, to);
+    return this.withRecentChanges((await this.fetchBusySlots(emails, from, to)).value, from, to);
   }
 
-  private async fetchBusySlots(emails: string[], from: string, to: string): Promise<Map<string, BusySlot[] | null>> {
+  /**
+   * Occupation lue par lots parallèles. Un lot en échec (délai dépassé, erreur Graph) marque ses
+   * salles « disponibilité inconnue » sans bloquer les autres ; si tous les lots échouent, l'erreur
+   * est remontée (service de calendrier indisponible).
+   */
+  private async fetchBusySlots(emails: string[], from: string, to: string): Promise<{ value: Map<string, BusySlot[] | null>; complete: boolean }> {
     const result = new Map<string, BusySlot[] | null>();
-    for (let i = 0; i < emails.length; i += SCHEDULE_BATCH) {
-      const batch = emails.slice(i, i + SCHEDULE_BATCH);
-      const res = await this.graph.request<{ value: GraphSchedule[] }>(
-        'POST',
-        `/users/${encodeURIComponent(this.organizer)}/calendar/getSchedule`,
-        {
+    const batches: string[][] = [];
+    for (let i = 0; i < emails.length; i += SCHEDULE_BATCH) batches.push(emails.slice(i, i + SCHEDULE_BATCH));
+    const errors: unknown[] = [];
+
+    await forEachLimit(batches, SCHEDULE_CONCURRENCY, async (batch) => {
+      try {
+        const res = await this.graph.request<{ value: GraphSchedule[] }>('POST', `/users/${encodeURIComponent(this.organizer)}/calendar/getSchedule`, {
+          // Lecture seule : peut être relancée après un délai dépassé.
+          idempotent: true,
           body: {
             schedules: batch,
             startTime: { dateTime: `${from}:00`, timeZone: this.timeZone },
             endTime: { dateTime: `${to}:00`, timeZone: this.timeZone },
             availabilityViewInterval: 15,
           },
-        },
-      );
-      for (const schedule of res.value) {
-        const email = schedule.scheduleId.toLowerCase();
-        if (schedule.error) {
-          result.set(email, null);
-          continue;
+        });
+        for (const schedule of res.value) {
+          const email = schedule.scheduleId.toLowerCase();
+          if (schedule.error) {
+            result.set(email, null);
+            continue;
+          }
+          result.set(
+            email,
+            (schedule.scheduleItems ?? [])
+              .filter((item) => BUSY_STATUSES.has(item.status))
+              .map((item) => ({ start: graphToLocal(item.start, this.timeZone), end: graphToLocal(item.end, this.timeZone) })),
+          );
         }
-        result.set(
-          email,
-          (schedule.scheduleItems ?? [])
-            .filter((item) => BUSY_STATUSES.has(item.status))
-            .map((item) => ({ start: graphToLocal(item.start, this.timeZone), end: graphToLocal(item.end, this.timeZone) })),
-        );
+      } catch (err) {
+        errors.push(err);
+        for (const email of batch) result.set(email.toLowerCase(), null);
+        // Adresses journalisées : permet de repérer une salle qui ralentit tout son lot.
+        console.warn(JSON.stringify({ type: 'schedule_batch_failed', rooms: batch, message: (err as Error).message }));
       }
-    }
-    return result;
+    });
+
+    if (batches.length > 0 && errors.length === batches.length) throw errors[0];
+    return { value: result, complete: errors.length === 0 };
   }
 }
 

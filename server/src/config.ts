@@ -58,6 +58,8 @@ const schema = z
     // Identité managée du runbook qui synchronise l'annuaire des salles (seule autorisée à le mettre à jour).
     SYNC_PRINCIPAL_ID: z.guid().optional(),
     ALLOWED_ATTENDEE_DOMAINS: csv,
+    // Salles masquées du portail, séparées par des virgules : adresses exactes ou motifs avec « * ».
+    EXCLUDED_ROOMS: csv,
 
     STORAGE_TABLE_ENDPOINT: z.string().url(),
     STORAGE_CONNECTION_STRING: z.string().optional(),

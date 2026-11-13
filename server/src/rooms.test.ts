@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { GraphClient } from './graph.js';
-import { RoomService } from './rooms.js';
+import { GraphError, type GraphClient } from './graph.js';
+import { RoomService, roomExclusion } from './rooms.js';
 
 const room = 'room1@contoso.com';
 
@@ -124,4 +124,48 @@ test('une annulation récente libère le créneau avant son traitement par la sa
   rooms.recordCancellation(room, '2026-11-05T09:00', '2026-11-05T10:00');
   const busy = (await rooms.getBusySlots([room], '2026-11-05T08:00', '2026-11-05T19:00')).get(room);
   assert.deepEqual(busy, [{ start: '2026-11-05T14:00', end: '2026-11-05T15:00' }]);
+});
+
+test('salles exclues : adresses exactes et motifs, ni listées ni réservables', async () => {
+  const graph = placesGraph([
+    { emailAddress: 'A@contoso.com', displayName: 'A' },
+    { emailAddress: 'direction@contoso.com', displayName: 'Direction' },
+    { emailAddress: 'salle1-labo@contoso.com', displayName: 'Labo 1' },
+    { emailAddress: 'b@site-b.contoso.com', displayName: 'Site B' },
+  ]);
+  const rooms = new RoomService(graph, 'org@contoso.com', 'Europe/Paris', [], ['Direction@contoso.com', '*-labo@contoso.com', '*@site-b.contoso.com']);
+  assert.deepEqual((await rooms.listRooms()).map((r) => r.email), ['a@contoso.com']);
+  assert.equal(await rooms.getRoom('direction@contoso.com'), undefined);
+});
+
+test('exclusion : le point d’un motif n’est pas un joker', () => {
+  const excluded = roomExclusion(['*@site.contoso.com']);
+  assert.equal(excluded('x@site.contoso.com'), true);
+  assert.equal(excluded('x@siteXcontoso.com'), false);
+});
+
+/** Faux Graph : getSchedule échoue pour les lots qui contiennent une salle « lente ». */
+function scheduleGraph(slow: Set<string>): GraphClient {
+  return {
+    request: async (_m: string, _p: string, opts: { body: { schedules: string[] } }) => {
+      if (opts.body.schedules.some((s) => slow.has(s))) throw new GraphError(504, 'timeout', 'no response');
+      return { value: opts.body.schedules.map((s) => ({ scheduleId: s, scheduleItems: [] })) };
+    },
+    getAll: async () => [],
+  } as unknown as GraphClient;
+}
+
+test('un lot getSchedule en échec : ses salles en disponibilité inconnue, les autres affichées', async () => {
+  const emails = Array.from({ length: 25 }, (_, i) => `r${i}@contoso.com`);
+  const rooms = new RoomService(scheduleGraph(new Set(['r3@contoso.com'])), 'org@contoso.com', 'Europe/Paris');
+  const busy = await rooms.getBusySlots(emails, '2026-11-05T08:00', '2026-11-05T19:00');
+  assert.equal(busy.get('r3@contoso.com'), null);
+  assert.equal(busy.get('r0@contoso.com'), null, 'même lot que la salle lente');
+  assert.deepEqual(busy.get('r10@contoso.com'), []);
+  assert.deepEqual(busy.get('r24@contoso.com'), []);
+});
+
+test('tous les lots getSchedule en échec : erreur Graph remontée', async () => {
+  const rooms = new RoomService(scheduleGraph(new Set(['r0@contoso.com'])), 'org@contoso.com', 'Europe/Paris');
+  await assert.rejects(rooms.getBusySlots(['r0@contoso.com'], '2026-11-05T08:00', '2026-11-05T19:00'), GraphError);
 });
