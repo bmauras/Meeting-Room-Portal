@@ -30,7 +30,9 @@ export function apiRouter(deps: { config: Config; sessions: Sessions; rooms: Roo
 
   const createLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
-    limit: 20,
+    limit: config.BOOKING_MAX_PER_HOUR,
+    // Seules les réservations réussies comptent : un créneau refusé ne pénalise pas l'utilisateur.
+    skipFailedRequests: true,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: (_req, res) => userOf(res).oid,

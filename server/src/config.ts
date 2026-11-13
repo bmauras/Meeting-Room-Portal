@@ -72,6 +72,8 @@ const schema = z
     BOOKING_SLOT_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
     BOOKING_MAX_DURATION_MINUTES: z.coerce.number().int().positive().default(240),
     BOOKING_HORIZON_DAYS: z.coerce.number().int().positive().max(365).default(30),
+    // Réservations créées par heure et par utilisateur (fenêtre fixe, échecs non comptés).
+    BOOKING_MAX_PER_HOUR: z.coerce.number().int().positive().default(20),
     BOOKING_MAX_ACTIVE_PER_USER: z.coerce.number().int().positive().default(10),
     BOOKING_ALLOW_WEEKENDS: bool('false'),
 
