@@ -121,6 +121,25 @@ export function roomExclusion(patterns: string[]): (email: string) => boolean {
   };
 }
 
+/**
+ * Retire le préfixe commun des noms de salles (convention de nommage Exchange, ex. « Meeting Room - ») :
+ * casse ignorée, espaces souples, tiret court ou long. Un nom qui ne commence pas par le préfixe,
+ * ou qui ne contient que lui, est conservé tel quel.
+ */
+export function roomNameShortener(prefix: string): (name: string) => string {
+  const trimmed = prefix.trim();
+  if (!trimmed) return (name) => name;
+  const pattern = [...trimmed]
+    .map((c) => (/\s/.test(c) ? '\\s*' : /[-–—]/.test(c) ? '[-–—]' : c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .join('')
+    .replace(/(\\s\*)+/g, '\\s*');
+  const re = new RegExp(`^\\s*${pattern}\\s*`, 'i');
+  return (name) => {
+    const short = name.replace(re, '').trim();
+    return short || name;
+  };
+}
+
 /** Exécute `fn` sur chaque élément, au plus `limit` à la fois. */
 async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
@@ -139,6 +158,7 @@ export class RoomService {
   private recent = new Map<string, RecentChange>();
   private directorySyncedAt: number | null = null;
   private readonly isExcluded: (email: string) => boolean;
+  private readonly shortName: (name: string) => string;
 
   constructor(
     private readonly graph: GraphClient,
@@ -146,8 +166,10 @@ export class RoomService {
     private readonly timeZone: string,
     private directory: DirectoryRoom[] = [],
     excludedRooms: string[] = [],
+    roomNamePrefix = '',
   ) {
     this.isExcluded = roomExclusion(excludedRooms);
+    this.shortName = roomNameShortener(roomNamePrefix);
   }
 
   /** Annuaire Exchange à jour : pris en compte immédiatement. */
@@ -198,7 +220,12 @@ export class RoomService {
     // Salles exclues par la configuration : absentes de la liste, donc ni affichées, ni interrogées,
     // ni réservables (la création d'une réservation vérifie la salle dans cette liste).
     const visible = merged.filter((r) => !reserved.has(r.email));
-    const value = visible.filter((r) => !this.isExcluded(r.email)).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+    // Nom court (sans le préfixe de la convention de nommage) : affiché dans le portail, l'invitation
+    // et le lieu de la réunion ; la salle reste la ressource Exchange, avec son nom complet.
+    const value = visible
+      .filter((r) => !this.isExcluded(r.email))
+      .map((r) => ({ ...r, name: this.shortName(r.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'fr'));
     this.rooms = { at: Date.now(), value };
     console.log(
       JSON.stringify({

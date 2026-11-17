@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GraphError, type GraphClient } from './graph.js';
-import { RoomService, roomExclusion } from './rooms.js';
+import { RoomService, roomExclusion, roomNameShortener } from './rooms.js';
 
 const room = 'room1@contoso.com';
 
@@ -206,4 +206,25 @@ test('planning : demandes simultanées sur la même date = un seul appel Graph',
   const results = await Promise.all([1, 2, 3].map(() => rooms.getDayAvailability('2026-11-05', '08:00', '19:00')));
   assert.equal(calls, 1);
   for (const r of results) assert.deepEqual(r.get('a@contoso.com'), []);
+});
+
+test('nom court : préfixe de la convention retiré, variantes de saisie tolérées', () => {
+  const short = roomNameShortener('Meeting Room - ');
+  assert.equal(short('Meeting Room - Lofoten'), 'Lofoten');
+  assert.equal(short('meeting room – Huahine'), 'Huahine', 'casse et tiret long');
+  assert.equal(short('Meeting Room-Elba'), 'Elba', 'sans espaces autour du tiret');
+  assert.equal(short('Salle du conseil'), 'Salle du conseil', 'hors convention : inchangé');
+  assert.equal(short('Meeting Room - '), 'Meeting Room - ', 'préfixe seul : inchangé');
+  assert.equal(roomNameShortener('')('Meeting Room - Lofoten'), 'Meeting Room - Lofoten', 'sans préfixe configuré');
+});
+
+test('nom court : appliqué à la liste et au tri, salle trouvée par getRoom', async () => {
+  const graph = placesGraph([
+    { emailAddress: 'z@contoso.com', displayName: 'Meeting Room - Bora' },
+    { emailAddress: 'a@contoso.com', displayName: 'Meeting Room - Zanzibar' },
+    { emailAddress: 'c@contoso.com', displayName: 'Atelier' },
+  ]);
+  const rooms = new RoomService(graph, 'org@contoso.com', 'Europe/Paris', [], [], 'Meeting Room - ');
+  assert.deepEqual((await rooms.listRooms()).map((r) => r.name), ['Atelier', 'Bora', 'Zanzibar']);
+  assert.equal((await rooms.getRoom('a@contoso.com'))?.name, 'Zanzibar');
 });

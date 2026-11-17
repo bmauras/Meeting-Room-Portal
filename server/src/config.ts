@@ -60,6 +60,8 @@ const schema = z
     ALLOWED_ATTENDEE_DOMAINS: csv,
     // Salles masquées du portail, séparées par des virgules : adresses exactes ou motifs avec « * ».
     EXCLUDED_ROOMS: csv,
+    // Préfixe retiré du nom des salles à l'affichage (ex. « Meeting Room - »). Vide = noms complets.
+    ROOM_NAME_PREFIX: z.string().max(100).default(''),
 
     STORAGE_TABLE_ENDPOINT: z.string().url(),
     STORAGE_CONNECTION_STRING: z.string().optional(),
