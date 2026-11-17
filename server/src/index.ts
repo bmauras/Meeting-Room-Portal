@@ -183,4 +183,6 @@ app.use(errorHandler);
 app.listen(config.PORT, () => {
   console.log(`Meeting Room Portal à l'écoute sur le port ${config.PORT}`);
   void bookings.checkOrganizerOnlineMeetings();
+  // Liste des salles chargée dès le démarrage : le premier utilisateur n'attend pas l'API Places.
+  rooms.listRooms().catch((err: Error) => console.warn(JSON.stringify({ type: 'rooms_preload_failed', message: err.message })));
 });

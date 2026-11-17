@@ -169,3 +169,41 @@ test('tous les lots getSchedule en échec : erreur Graph remontée', async () =>
   const rooms = new RoomService(scheduleGraph(new Set(['r0@contoso.com'])), 'org@contoso.com', 'Europe/Paris');
   await assert.rejects(rooms.getBusySlots(['r0@contoso.com'], '2026-11-05T08:00', '2026-11-05T19:00'), GraphError);
 });
+
+test('liste des salles expirée : servie aussitôt, rechargée en arrière-plan', async (t) => {
+  let calls = 0;
+  let release!: () => void;
+  const graph = {
+    request: async () => ({ value: [] }),
+    getAll: async (path: string) => {
+      if (!path.startsWith('/places/microsoft.graph.room?')) return [];
+      calls++;
+      if (calls > 1) await new Promise<void>((r) => (release = r)); // rechargement lent
+      return [{ emailAddress: `v${calls}@contoso.com`, displayName: `V${calls}` }];
+    },
+  } as unknown as GraphClient;
+  const rooms = new RoomService(graph, 'org@contoso.com', 'Europe/Paris');
+  assert.deepEqual((await rooms.listRooms()).map((r) => r.email), ['v1@contoso.com']);
+
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 2 * 60 * 60 * 1000 });
+  assert.deepEqual((await rooms.listRooms()).map((r) => r.email), ['v1@contoso.com'], 'ancienne liste, sans attendre Places');
+  release();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual((await rooms.listRooms()).map((r) => r.email), ['v2@contoso.com'], 'nouvelle liste une fois rechargée');
+});
+
+test('planning : demandes simultanées sur la même date = un seul appel Graph', async () => {
+  let calls = 0;
+  const graph = {
+    request: async (_m: string, _p: string, opts: { body: { schedules: string[] } }) => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 20));
+      return { value: opts.body.schedules.map((s) => ({ scheduleId: s, scheduleItems: [] })) };
+    },
+    getAll: async (path: string) => (path.startsWith('/places/microsoft.graph.room?') ? [{ emailAddress: 'a@contoso.com', displayName: 'A' }] : []),
+  } as unknown as GraphClient;
+  const rooms = new RoomService(graph, 'org@contoso.com', 'Europe/Paris');
+  const results = await Promise.all([1, 2, 3].map(() => rooms.getDayAvailability('2026-11-05', '08:00', '19:00')));
+  assert.equal(calls, 1);
+  for (const r of results) assert.deepEqual(r.get('a@contoso.com'), []);
+});

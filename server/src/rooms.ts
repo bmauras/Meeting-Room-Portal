@@ -37,6 +37,8 @@ interface GraphSchedule {
 }
 
 const ROOMS_TTL_MS = 60 * 60 * 1000;
+// Liste expirée mais encore servie pendant son rechargement en arrière-plan ; au-delà, l'utilisateur attend.
+const ROOMS_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 // Une liste vide est souvent transitoire (synchronisation Exchange → Places) : on la relit vite.
 const EMPTY_ROOMS_TTL_MS = 2 * 60 * 1000;
 const AVAILABILITY_TTL_MS = 30 * 1000;
@@ -132,6 +134,8 @@ export class RoomService {
   private rooms?: { at: number; value: Room[] };
   private loading?: Promise<Room[]>;
   private availability = new Map<string, { at: number; value: Map<string, BusySlot[] | null> }>();
+  // Lectures du planning en cours, par date : plusieurs utilisateurs sur la même date = un seul appel Graph.
+  private availabilityLoading = new Map<string, Promise<Map<string, BusySlot[] | null>>>();
   private recent = new Map<string, RecentChange>();
   private directorySyncedAt: number | null = null;
   private readonly isExcluded: (email: string) => boolean;
@@ -154,13 +158,19 @@ export class RoomService {
   }
 
   async listRooms(): Promise<Room[]> {
-    if (this.rooms && Date.now() - this.rooms.at < (this.rooms.value.length ? ROOMS_TTL_MS : EMPTY_ROOMS_TTL_MS)) {
-      return this.rooms.value;
-    }
+    const cached = this.rooms;
+    const age = cached ? Date.now() - cached.at : Infinity;
+    if (cached && age < (cached.value.length ? ROOMS_TTL_MS : EMPTY_ROOMS_TTL_MS)) return cached.value;
     // Requêtes simultanées (salles + planning) : un seul appel Graph.
     this.loading ??= this.loadRooms().finally(() => {
       this.loading = undefined;
     });
+    // Liste expirée mais non vide : servie immédiatement, le rechargement (Places, lent sur un grand
+    // tenant) se poursuit en arrière-plan au lieu de retenir la requête de l'utilisateur.
+    if (cached?.value.length && age < ROOMS_MAX_STALE_MS) {
+      this.loading.catch((err: Error) => console.warn(JSON.stringify({ type: 'rooms_refresh_failed', message: err.message })));
+      return cached.value;
+    }
     return this.loading;
   }
 
@@ -241,15 +251,22 @@ export class RoomService {
     const to = `${date}T${dayEnd}`;
     const cached = this.availability.get(date);
     if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return this.withRecentChanges(cached.value, from, to);
-    const rooms = await this.listRooms();
-    const { value, complete } = await this.fetchBusySlots(
-      rooms.map((r) => r.email),
-      from,
-      to,
-    );
-    // Résultat partiel (un lot en échec) : non mis en cache, le prochain rafraîchissement réessaie.
-    if (complete) this.availability.set(date, { at: Date.now(), value });
-    return this.withRecentChanges(value, from, to);
+    let pending = this.availabilityLoading.get(date);
+    if (!pending) {
+      pending = (async () => {
+        const rooms = await this.listRooms();
+        const { value, complete } = await this.fetchBusySlots(
+          rooms.map((r) => r.email),
+          from,
+          to,
+        );
+        // Résultat partiel (un lot en échec) : non mis en cache, le prochain rafraîchissement réessaie.
+        if (complete) this.availability.set(date, { at: Date.now(), value });
+        return value;
+      })().finally(() => this.availabilityLoading.delete(date));
+      this.availabilityLoading.set(date, pending);
+    }
+    return this.withRecentChanges(await pending, from, to);
   }
 
   /**

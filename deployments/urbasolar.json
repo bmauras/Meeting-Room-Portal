@@ -11,7 +11,7 @@
     "domains": ["volkswind.com"]
   },
   "organizerUpn": "booking.room@urbasolar.com",
-  "allowedAttendeeDomains": ["urbasolar.com","solar.axpo.com","volkswind.com"],
+  "allowedAttendeeDomains": ["*"],
   "allowInternalUsers": true,
   "timeZone": "Europe/Paris",
   "appServiceSku": "B1",
