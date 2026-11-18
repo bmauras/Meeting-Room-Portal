@@ -43,6 +43,8 @@ const schema = z
     TENANT_ID: z.guid(),
     PARTNER_TENANT_ID: z.guid(),
     PARTNER_DISPLAY_NAME: z.string().min(1).max(40),
+    // Préfixe de l'objet des réunions (ex. « [VOLKSWIND] »). Vide = « [Réservation de salle – <partenaire>] ».
+    MEETING_SUBJECT_PREFIX: z.string().max(60).default(''),
     ALLOW_INTERNAL_USERS: bool('false'),
 
     // App registration utilisée pour la connexion OIDC des utilisateurs.

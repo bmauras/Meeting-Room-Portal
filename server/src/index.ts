@@ -70,6 +70,7 @@ const bookings = new BookingService({
   rules,
   organizer: config.ORGANIZER_UPN,
   partnerDisplayName: config.PARTNER_DISPLAY_NAME,
+  subjectPrefix: config.MEETING_SUBJECT_PREFIX,
   publicBaseUrl: config.PUBLIC_BASE_URL,
   maxActivePerUser: config.BOOKING_MAX_ACTIVE_PER_USER,
 });

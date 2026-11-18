@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { invitationBody, type MeetingDetails } from './bookings.js';
+import { invitationBody, meetingSubject, type MeetingDetails } from './bookings.js';
 
 const details: MeetingDetails = {
   roomName: 'Boavista',
@@ -26,4 +26,15 @@ test('invitation sans réunion Teams : pas de bloc Teams', () => {
 test('invitation : objet saisi échappé', () => {
   const html = invitationBody({ ...details, subject: 'A & B <i>' });
   assert.match(html, /A &amp; B &lt;i&gt;/);
+});
+
+test('invitation : formule de fin avant le bloc Teams', () => {
+  const html = invitationBody(details);
+  assert.match(html, /Objet :<\/b> Test 3<\/p><p>Bonne journée et à bientôt !<\/p><p><b>Réunion Microsoft Teams/);
+});
+
+test('objet : préfixe configuré, à défaut le préfixe partenaire', () => {
+  assert.equal(meetingSubject('Test 3', 'URBASOLAR', '[VOLKSWIND]'), '[VOLKSWIND] Test 3');
+  assert.equal(meetingSubject('Test 3', 'URBASOLAR', '  '), '[Réservation de salle – URBASOLAR] Test 3');
+  assert.equal(meetingSubject('Test 3', 'URBASOLAR'), '[Réservation de salle – URBASOLAR] Test 3');
 });

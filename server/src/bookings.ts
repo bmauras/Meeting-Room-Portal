@@ -79,8 +79,18 @@ export function invitationBody(m: MeetingDetails): string {
     `<p><b>Quand :</b> ${escapeHtml(m.when)}<br>` +
     `<b>Salle :</b> ${escapeHtml(m.roomName)}<br>` +
     `<b>Objet :</b> ${escapeHtml(m.subject)}</p>` +
+    // Avant le bloc Teams : Exchange ajoute le sien à la suite du texte, le portail n'a pas la main après.
+    `<p>Bonne journée et à bientôt !</p>` +
     (m.joinUrl ? teamsBlock(m.joinUrl) : '')
   );
+}
+
+/**
+ * Objet de la réunion : préfixe configuré (ex. « [VOLKSWIND] »), à défaut « [Réservation de salle – <partenaire>] ».
+ * Le préfixe signale en interne une réunion créée par un partenaire via le portail.
+ */
+export function meetingSubject(subject: string, partnerDisplayName: string, prefix?: string): string {
+  return `${prefix?.trim() || `[Réservation de salle – ${partnerDisplayName}]`} ${subject}`;
 }
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -93,6 +103,8 @@ export interface BookingServiceDeps {
   rules: BookingRules;
   organizer: string;
   partnerDisplayName: string;
+  /** Préfixe de l'objet des réunions ; vide = « [Réservation de salle – <partenaire>] ». */
+  subjectPrefix?: string;
   publicBaseUrl: string;
   maxActivePerUser: number;
 }
@@ -186,7 +198,7 @@ export class BookingService {
     //    accepte ou refuse, selon ses propres règles.
     const event = await graph.request<GraphEvent>('POST', this.eventsPath, {
       body: {
-        subject: `[Réservation de salle – ${this.deps.partnerDisplayName}] ${subject.value}`,
+        subject: meetingSubject(subject.value, this.deps.partnerDisplayName, this.deps.subjectPrefix),
         body: { contentType: 'html', content: invitationBody(details) },
         start: { dateTime: `${input.start}:00`, timeZone: rules.timeZone },
         end: { dateTime: `${input.end}:00`, timeZone: rules.timeZone },
