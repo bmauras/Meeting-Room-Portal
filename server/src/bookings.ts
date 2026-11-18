@@ -61,43 +61,26 @@ function teamsBlock(joinUrl: string): string {
 }
 
 export interface MeetingDetails {
-  bookerName: string;
   roomName: string;
   /** « mardi 1 décembre 2026, 14:15 – 15:15 » */
   when: string;
   subject: string;
-  attendees: string[];
   joinUrl: string | null;
 }
 
 /**
- * Corps de la réunion, reçu par TOUS les invités : uniquement les informations de la réunion,
- * sans lien de gestion (réservé au réservant, dans sa confirmation).
+ * Corps de la réunion, seul message envoyé, identique pour tous les invités (réservant compris) :
+ * les informations de la réunion et le lien Teams, sans lien de gestion.
  */
 export function invitationBody(m: MeetingDetails): string {
   return (
-    `<p><b>${escapeHtml(m.bookerName)}</b> vous invite à une réunion.</p>` +
-    `<p><b>Quand :</b> ${escapeHtml(m.when)}<br><b>Où :</b> ${escapeHtml(m.roomName)}</p>` +
+    `<p>Bonjour,</p>` +
+    `<p>Vous avez été invité(e) à participer à une réunion.</p>` +
+    `<p><b>Quand :</b> ${escapeHtml(m.when)}<br>` +
+    `<b>Salle :</b> ${escapeHtml(m.roomName)}<br>` +
+    `<b>Objet :</b> ${escapeHtml(m.subject)}</p>` +
     (m.joinUrl ? teamsBlock(m.joinUrl) : '')
   );
-}
-
-/** E-mail de confirmation envoyé au seul réservant, avec le lien du portail pour modifier ou annuler. */
-export function confirmationMail(m: MeetingDetails, publicBaseUrl: string): { subject: string; html: string } {
-  const attendees = m.attendees.length ? m.attendees.map(escapeHtml).join(', ') : 'aucun autre participant';
-  return {
-    subject: `Réservation enregistrée : ${m.roomName} – ${m.when}`,
-    html:
-      `<p>Bonjour ${escapeHtml(m.bookerName)},</p>` +
-      `<p>Votre demande a bien été enregistrée.</p>` +
-      `<p><b>Salle :</b> ${escapeHtml(m.roomName)}<br>` +
-      `<b>Quand :</b> ${escapeHtml(m.when)}<br>` +
-      `<b>Objet :</b> ${escapeHtml(m.subject)}<br>` +
-      `<b>Participants invités :</b> ${attendees}</p>` +
-      (m.joinUrl ? `<p><a href="${escapeHtml(m.joinUrl)}">Rejoindre la réunion Teams</a></p>` : '') +
-      `<p><b>Modifier ou annuler</b> cette réservation : <a href="${escapeHtml(publicBaseUrl)}">Ouvrir le portail</a></p>` +
-      `<p><i>La salle confirme ou refuse automatiquement ; vous verrez son statut dans « Mes réservations ».</i></p>`,
-  };
 }
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -196,7 +179,7 @@ export class BookingService {
     const attendees = { value: attendeeList };
     const id = randomUUID();
     const when = `${formatLongDate(input.start.slice(0, 10))}, ${input.start.slice(11)} – ${input.end.slice(11)}`;
-    const details: MeetingDetails = { bookerName: user.name, roomName: room.name, when, subject: subject.value, attendees: attendees.value, joinUrl: null };
+    const details: MeetingDetails = { roomName: room.name, when, subject: subject.value, joinUrl: null };
 
     // 1. Événement créé SANS participants : aucune invitation ne part encore, Exchange crée la
     //    réunion Teams. La salle sera ajoutée en ressource : c'est son Calendar Attendant qui
@@ -283,40 +266,8 @@ export class BookingService {
       // Adresses invitées conservées : le portail envoie des invitations depuis notre domaine.
       details: { bookingId: id, room: room.email, start: input.start, end: input.end, attendees: attendees.value },
     });
-    // Sans attendre : la réservation est faite, un échec d'envoi ne doit ni la bloquer ni la ralentir.
-    void this.sendConfirmation(user, { ...details, joinUrl }, id);
 
     return toView(record, 'pending', joinUrl);
-  }
-
-  /**
-   * Confirmation au seul réservant, depuis la boîte organisatrice. Exige le rôle Exchange
-   * « Application Mail.Send » limité à cette boîte ; sans lui, l'échec est seulement journalisé.
-   */
-  private async sendConfirmation(user: SessionUser, details: MeetingDetails, bookingId: string): Promise<void> {
-    const mail = confirmationMail(details, this.deps.publicBaseUrl);
-    try {
-      await this.deps.graph.request('POST', `/users/${encodeURIComponent(this.deps.organizer)}/sendMail`, {
-        body: {
-          message: {
-            subject: mail.subject,
-            body: { contentType: 'html', content: mail.html },
-            toRecipients: [{ emailAddress: { address: user.email, name: user.name } }],
-          },
-          saveToSentItems: false,
-        },
-      });
-    } catch (err) {
-      console.warn(
-        JSON.stringify({
-          type: 'confirmation_mail_failed',
-          bookingId,
-          status: err instanceof GraphError ? err.status : null,
-          code: err instanceof GraphError ? err.code : null,
-          message: (err as Error).message,
-        }),
-      );
-    }
   }
 
   /** La réunion Teams est parfois rattachée à l'événement quelques instants après sa création. */
